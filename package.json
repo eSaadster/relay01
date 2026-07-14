@@ -1,0 +1,86 @@
+{
+  "name": "relay01",
+  "version": "0.1.0",
+  "description": "Slack bot powered by pi-agent",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "relay01": "bin/relay01.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
+    "slack": "tsx src/index.ts",
+    "lint": "biome check src",
+    "lint:fix": "biome check --write --unsafe src && biome format --write src",
+    "format": "biome format src",
+    "format:fix": "biome format src --write",
+    "test": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@10.23.0",
+  "pnpm": {
+    "overrides": {
+      "@sinclair/typebox": "0.34.48"
+    }
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.74.0",
+    "@earendil-works/pi-ai": "^0.74.0",
+    "@sinclair/typebox": "0.34.48",
+    "@slack/socket-mode": "^2.0.3",
+    "@slack/web-api": "^7.8.0",
+    "body-parser": "^2.2.1",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.2",
+    "croner": "^9.1.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "json5": "^2.2.3",
+    "mcporter": "^0.7.0",
+    "pino": "^10.1.0",
+    "sharp": "^0.33.5",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.7",
+    "@types/body-parser": "^1.19.6",
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
+    "@vitest/coverage-v8": "^4.0.13",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.13"
+  },
+  "vitest": {
+    "coverage": {
+      "provider": "v8",
+      "reporter": [
+        "text",
+        "lcov"
+      ],
+      "thresholds": {
+        "lines": 70,
+        "functions": 70,
+        "branches": 70,
+        "statements": 70
+      },
+      "include": [
+        "src/**/*.ts"
+      ],
+      "exclude": [
+        "src/**/*.test.ts"
+      ]
+    },
+    "exclude": [
+      "dist/**"
+    ]
+  }
+}

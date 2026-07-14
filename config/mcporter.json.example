@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "twitter": {
+      "baseUrl": "https://backend.composio.dev/v3/mcp/<your-twitter-app-id>/mcp?user_id=<your-user-id>",
+      "headers": {
+        "x-api-key": "${COMPOSIO_API_KEY}"
+      }
+    },
+    "reddit": {
+      "baseUrl": "https://backend.composio.dev/v3/mcp/<your-reddit-app-id>/mcp?user_id=<your-user-id>",
+      "headers": {
+        "x-api-key": "${COMPOSIO_API_KEY}"
+      }
+    }
+  }
+}

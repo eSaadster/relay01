@@ -1,0 +1,13 @@
+node_modules
+.env
+dist
+pnpm-lock.yaml
+coverage
+.pnpm-store
+.env
+data/
+.tmp/
+package-lock.json
+.claude/
+.devin/
+.osgrep/
