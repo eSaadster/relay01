@@ -392,7 +392,7 @@ function formatToolName(toolName: string): string {
     web_search: "Searching web",
     glob: "Finding files",
     grep: "Searching code",
-    slack_notify: "Sending Slack notification",
+    send_message: "Sending message",
     canvas_create: "Creating canvas",
     canvas_edit: "Editing canvas",
     canvas_sections_lookup: "Looking up canvas sections",

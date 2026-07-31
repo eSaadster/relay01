@@ -1399,14 +1399,6 @@ function createSpawnAgentTool(ctx: SessionContext): AgentTool<typeof spawnAgentS
 // ============================================================================
 
 // ============================================================================
-// slack_notify tool
-// ============================================================================
-
-const slackNotifySchema = Type.Object({
-  message: Type.String({ description: "Message to send to this Slack channel/DM" }),
-});
-
-// ============================================================================
 // canvas_create tool
 // ============================================================================
 
@@ -1547,20 +1539,60 @@ function createCanvasSectionsLookupTool(
   };
 }
 
-function createSlackNotifyTool(
+const sendMessageSchema = Type.Object({
+  message: Type.String({
+    description: "The message text to send to the current chat",
+  }),
+});
+
+/**
+ * Lets the agent push a message mid-run instead of only at the end of its turn.
+ *
+ * Without this, a run that kicks off long work can only report "starting..." —
+ * the harness delivers exactly one reply per run, so any follow-up the agent
+ * wanted to send had nowhere to go.
+ *
+ * Always targets the session the run belongs to; the agent cannot pick an
+ * arbitrary recipient.
+ */
+function createSendMessageTool(
+  ctx: SessionContext,
   notify: (message: string) => Promise<void>
-): AgentTool<typeof slackNotifySchema> {
+): AgentTool<typeof sendMessageSchema> {
   return {
-    name: "slack_notify",
-    label: "Send Slack notification",
-    description: "Send a proactive Slack message to yourself (outside any reply thread). Use this when you've finished a long task and want to alert the user, or any time you want to reach out unprompted.",
-    parameters: slackNotifySchema,
-    execute: async (_toolCallId: string, params: Static<typeof slackNotifySchema>): Promise<AgentToolResult<undefined>> => {
-      await notify(params.message);
-      return {
-        content: [{ type: "text", text: `Slack notification sent: ${params.message}` }],
-        details: undefined,
-      };
+    name: "send_message",
+    label: "Send Message",
+    description: `Send a message to the current chat right now, without ending your turn.
+
+Use this when a task will take a while and the user should not be left waiting in silence
+(send a short progress note, keep working, then continue as normal), or to reach out
+proactively — e.g. alerting the user after finishing a long background task.
+
+IMPORTANT: your final response is delivered automatically when your turn ends. Do not use
+this tool to send that final answer — it would arrive twice. This is for progress updates,
+intermediate results, and unprompted outreach only.`,
+    parameters: sendMessageSchema,
+    execute: async (_toolCallId: string, params: Static<typeof sendMessageSchema>): Promise<AgentToolResult<undefined>> => {
+      const text = params.message?.trim();
+      if (!text) {
+        return {
+          content: [{ type: "text", text: "Error: message is required" }],
+          details: undefined,
+        };
+      }
+      try {
+        console.log(`[send_message] Sending interim message to ${ctx.sessionName} (${text.length} chars)`);
+        await notify(text);
+        return {
+          content: [{ type: "text", text: "Message sent." }],
+          details: undefined,
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text", text: `Failed to send: ${err.message || String(err)}` }],
+          details: undefined,
+        };
+      }
     },
   };
 }
@@ -1598,7 +1630,7 @@ export function createTools(
     createSpawnAgentTool(ctx),
   ];
   if (options?.notify) {
-    tools.push(createSlackNotifyTool(options.notify));
+    tools.push(createSendMessageTool(ctx, options.notify));
   }
   if (options?.canvas) {
     tools.push(createCanvasCreateTool(options.canvas, options.channelId));
