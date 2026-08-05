@@ -3,6 +3,7 @@ import { type ConversationsHistoryResponse, WebClient } from "@slack/web-api";
 import { readFileSync } from "fs";
 import { basename } from "path";
 import * as log from "./log.js";
+import { splitSlackText } from "./split-message.js";
 import { type Attachment, ChannelStore } from "./store.js";
 
 export interface SlackMessage {
@@ -487,11 +488,47 @@ export class MomBot {
 		// merge). We re-send the stored blocks on later updates so the card survives.
 		let hasRenderedBlocks = false;
 		let lastBlocks: unknown[] | null = null;
+		let overflowPostedCount = 0;
 		// Build chat.update args, preserving the rendered Block Kit card if present.
 		const buildUpdate = (displayText: string) =>
 			hasRenderedBlocks && lastBlocks
 				? { channel: event.channel, ts: messageTs!, text: displayText, blocks: lastBlocks as any }
 				: { channel: event.channel, ts: messageTs!, text: displayText };
+
+		// Post/update the first chunk on the main message; overflow goes in thread replies.
+		const deliverText = async (text: string, opts?: { blocks?: unknown[] | null }): Promise<void> => {
+			const chunks = splitSlackText(text);
+
+			if (messageTs) {
+				if (opts?.blocks) {
+					await this.webClient.chat.update({
+						channel: event.channel,
+						ts: messageTs,
+						text: chunks[0],
+						blocks: opts.blocks as any,
+					});
+				} else {
+					await this.webClient.chat.update(buildUpdate(chunks[0]));
+				}
+			} else {
+				const result = await this.webClient.chat.postMessage({
+					channel: event.channel,
+					text: chunks[0],
+					...(opts?.blocks ? { blocks: opts.blocks as any } : {}),
+				});
+				messageTs = result.ts as string;
+			}
+
+			const neededOverflow = chunks.length - 1;
+			while (overflowPostedCount < neededOverflow) {
+				overflowPostedCount++;
+				await this.webClient.chat.postMessage({
+					channel: event.channel,
+					thread_ts: messageTs!,
+					text: chunks[overflowPostedCount],
+				});
+			}
+		};
 
 		return {
 			message: {
@@ -521,18 +558,7 @@ export class MomBot {
 
 					// Add working indicator if still working
 					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-
-					if (messageTs) {
-						// Update existing message (preserving any rendered Block Kit card)
-						await this.webClient.chat.update(buildUpdate(displayText));
-					} else {
-						// Post initial message
-						const result = await this.webClient.chat.postMessage({
-							channel: event.channel,
-							text: displayText,
-						});
-						messageTs = result.ts as string;
-					}
+					await deliverText(displayText);
 
 					// Log the response if requested
 					if (log) {
@@ -551,12 +577,13 @@ export class MomBot {
 					}
 					// Obfuscate usernames to avoid pinging people in thread details
 					const obfuscatedText = this.obfuscateUsernames(threadText);
-					// Post in thread under the main message
-					await this.webClient.chat.postMessage({
-						channel: event.channel,
-						thread_ts: messageTs,
-						text: obfuscatedText,
-					});
+					for (const chunk of splitSlackText(obfuscatedText)) {
+						await this.webClient.chat.postMessage({
+							channel: event.channel,
+							thread_ts: messageTs,
+							text: chunk,
+						});
+					}
 				});
 				await updatePromise;
 			},
@@ -589,17 +616,7 @@ export class MomBot {
 					accumulatedText = text;
 
 					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-
-					if (messageTs) {
-						await this.webClient.chat.update(buildUpdate(displayText));
-					} else {
-						// Post initial message
-						const result = await this.webClient.chat.postMessage({
-							channel: event.channel,
-							text: displayText,
-						});
-						messageTs = result.ts as string;
-					}
+					await deliverText(displayText);
 				});
 				await updatePromise;
 			},
@@ -611,12 +628,7 @@ export class MomBot {
 					// Keep accumulatedText in sync with the fallback so a later text
 					// update doesn't prepend stale step-checklist text.
 					accumulatedText = fallback;
-					if (messageTs) {
-						await this.webClient.chat.update({ channel: event.channel, ts: messageTs, text: fallback, blocks: blocks as any });
-					} else {
-						const result = await this.webClient.chat.postMessage({ channel: event.channel, text: fallback, blocks: blocks as any });
-						messageTs = result.ts as string;
-					}
+					await deliverText(fallback, { blocks });
 					await this.store.logBotResponse(event.channel, fallback, messageTs!);
 				});
 				await updatePromise;
@@ -629,7 +641,7 @@ export class MomBot {
 					// If we have a message, update it to add/remove indicator
 					if (messageTs) {
 						const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-						await this.webClient.chat.update(buildUpdate(displayText));
+						await deliverText(displayText);
 					}
 				});
 				await updatePromise;
