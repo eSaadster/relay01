@@ -13,12 +13,17 @@ import type {
  */
 function formatAlertMessage(click: ClickConfig, result: ClickResult): string {
   const timestamp = new Date(result.timestamp).toISOString();
+  const maxDetailsLength = 3500;
+  const details =
+    result.details.length > maxDetailsLength
+      ? `${result.details.slice(0, maxDetailsLength)}\n\n_(truncated — full result in scratchpad/clicks/${click.id}.md)_`
+      : result.details;
 
   return `:bell: *Click Alert: ${click.name}*
 
-${result.summary}
+*${result.summary}*
 
-> ${result.details.slice(0, 500)}${result.details.length > 500 ? "..." : ""}
+${details}
 
 _Click ID: \`${click.id}\` | ${timestamp}_`;
 }

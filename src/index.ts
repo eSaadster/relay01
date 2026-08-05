@@ -54,6 +54,11 @@ function loadSessionEnv(sessionName: string): void {
   const sessionEnvPath = join(homedir(), "relay01", "slack", sessionName, ".env");
   if (existsSync(sessionEnvPath)) {
     dotenv.config({ path: sessionEnvPath, override: true });
+  } else {
+    const globalEnvPath = join(homedir(), "relay01", "slack", ".env");
+    if (existsSync(globalEnvPath)) {
+      dotenv.config({ path: globalEnvPath, override: true });
+    }
   }
 }
 

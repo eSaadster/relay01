@@ -1,5 +1,7 @@
 // Click scheduler - manages timers for all clicks
 
+import { Cron } from "croner";
+
 import { logVerbose } from "../../globals.js";
 import { sendClickAlert } from "./alerts.js";
 import { discoverClicks } from "./discovery.js";
@@ -14,8 +16,12 @@ import type {
 /**
  * Manages scheduled click execution across all sessions.
  */
+type ClickScheduleHandle =
+  | { type: "interval"; handle: NodeJS.Timeout }
+  | { type: "cron"; handle: Cron };
+
 export class ClickScheduler {
-  private timers = new Map<string, NodeJS.Timeout>();
+  private schedules = new Map<string, ClickScheduleHandle>();
   private isRunning = new Map<string, boolean>();
   private config: ClickSchedulerConfig | null = null;
   private started = false;
@@ -62,7 +68,7 @@ export class ClickScheduler {
       }
     }
 
-    const totalScheduled = this.timers.size;
+    const totalScheduled = this.schedules.size;
     console.log(`[clicks] Scheduler started with ${totalScheduled} clicks`);
   }
 
@@ -72,12 +78,16 @@ export class ClickScheduler {
   stop(): void {
     console.log("[clicks] Stopping click scheduler...");
 
-    for (const [key, timer] of this.timers) {
-      clearInterval(timer);
-      logVerbose(`Cleared timer for ${key}`);
+    for (const [key, schedule] of this.schedules) {
+      if (schedule.type === "interval") {
+        clearInterval(schedule.handle);
+      } else {
+        schedule.handle.stop();
+      }
+      logVerbose(`Cleared schedule for ${key}`);
     }
 
-    this.timers.clear();
+    this.schedules.clear();
     this.isRunning.clear();
     this.started = false;
 
@@ -99,10 +109,14 @@ export class ClickScheduler {
     );
 
     // Clear existing timers for the specified session (or all)
-    for (const [key, timer] of this.timers) {
+    for (const [key, schedule] of this.schedules) {
       if (!sessionName || key.startsWith(`${sessionName}:`)) {
-        clearInterval(timer);
-        this.timers.delete(key);
+        if (schedule.type === "interval") {
+          clearInterval(schedule.handle);
+        } else {
+          schedule.handle.stop();
+        }
+        this.schedules.delete(key);
         this.isRunning.delete(key);
       }
     }
@@ -142,7 +156,23 @@ export class ClickScheduler {
       }
     }
 
-    console.log(`[clicks] Reload complete, ${this.timers.size} clicks scheduled`);
+    console.log(`[clicks] Reload complete, ${this.schedules.size} clicks scheduled`);
+  }
+
+  /**
+   * Clear an existing schedule for a click.
+   */
+  private clearSchedule(key: string): void {
+    const existing = this.schedules.get(key);
+    if (!existing) return;
+
+    if (existing.type === "interval") {
+      clearInterval(existing.handle);
+    } else {
+      existing.handle.stop();
+    }
+
+    this.schedules.delete(key);
   }
 
   /**
@@ -151,9 +181,30 @@ export class ClickScheduler {
   private scheduleClick(ctx: ClickContext, click: ClickConfig): void {
     const key = this.makeKey(ctx.sessionName, click.id);
 
-    // Clear existing timer if any
-    if (this.timers.has(key)) {
-      clearInterval(this.timers.get(key)!);
+    this.clearSchedule(key);
+
+    if (click.cron) {
+      const timezone = click.timezone;
+      logVerbose(
+        `Scheduling click ${key}: cron "${click.cron}"` +
+          (timezone ? ` (${timezone})` : "")
+      );
+
+      try {
+        const job = new Cron(click.cron, { timezone }, () => {
+          void this.runClick(ctx, click);
+        });
+
+        this.schedules.set(key, { type: "cron", handle: job });
+      } catch (err) {
+        console.error(`[clicks] Invalid cron for ${key}:`, err);
+      }
+      return;
+    }
+
+    if (!click.intervalMinutes) {
+      console.warn(`[clicks] Click ${key} has no schedule configured, skipping`);
+      return;
     }
 
     const intervalMs = click.intervalMinutes * 60 * 1000;
@@ -168,10 +219,7 @@ export class ClickScheduler {
     }, intervalMs);
     timer.unref();
 
-    this.timers.set(key, timer);
-
-    // Optionally run immediately on first schedule (disabled by default)
-    // void this.runClick(ctx, click);
+    this.schedules.set(key, { type: "interval", handle: timer });
   }
 
   /**
@@ -264,7 +312,7 @@ export class ClickScheduler {
   getStatus(): Array<{ key: string; running: boolean }> {
     const status: Array<{ key: string; running: boolean }> = [];
 
-    for (const key of this.timers.keys()) {
+    for (const key of this.schedules.keys()) {
       status.push({
         key,
         running: this.isRunning.get(key) || false,

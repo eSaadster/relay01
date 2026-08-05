@@ -360,7 +360,7 @@ async function loadOAuth(refreshProvider?: string): Promise<OAuthConfig> {
   }
 }
 
-function createGetApiKey(): (provider: string) => Promise<string | undefined> {
+export function createGetApiKey(): (provider: string) => Promise<string | undefined> {
   return async (provider: string) => {
     // Check custom provider API keys first
     const customKey = getCustomProviderApiKey(provider);

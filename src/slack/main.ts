@@ -133,7 +133,8 @@ async function handleMessage(ctx: SlackContext, source: "channel" | "dm"): Promi
 			await ctx.replaceMessage(`_Click "${clickId}" failed: ${result.error}_`);
 		} else {
 			const alertStatus = result.shouldAlert ? "🚨 ALERT" : "✓ OK";
-			await ctx.replaceMessage(`_Click "${clickId}" completed: ${alertStatus}_\n${result.summary}`);
+			const body = result.details.trim() || result.summary;
+			await ctx.replaceMessage(`_Click "${clickId}" completed: ${alertStatus}_\n\n${body}`);
 		}
 		return;
 	}

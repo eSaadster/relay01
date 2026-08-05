@@ -15,8 +15,14 @@ export interface ClickConfig {
   /** Instructions for the agent to execute */
   instructions: string;
 
-  /** Interval in minutes between executions */
-  intervalMinutes: number;
+  /** Interval in minutes between executions (use cron instead for fixed times) */
+  intervalMinutes?: number;
+
+  /** Cron expression for fixed schedules (minute hour day-of-month month day-of-week) */
+  cron?: string;
+
+  /** IANA timezone for cron schedules (e.g. "America/Los_Angeles") */
+  timezone?: string;
 
   /** Optional: explicit alert criteria (if not set, agent decides) */
   alertCriteria?: string;

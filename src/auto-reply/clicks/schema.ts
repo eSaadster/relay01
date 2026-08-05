@@ -16,10 +16,16 @@ export const ClickConfigSchema = z.object({
     .number()
     .int()
     .positive("Interval must be a positive integer")
-    .max(1440, "Interval cannot exceed 24 hours (1440 minutes)"),
+    .max(1440, "Interval cannot exceed 24 hours (1440 minutes)")
+    .optional(),
+  cron: z.string().min(1, "Cron expression cannot be empty").optional(),
+  timezone: z.string().optional(),
   alertCriteria: z.string().optional(),
   enabled: z.boolean().optional().default(true),
   model: z.string().optional(),
+}).refine((data) => data.intervalMinutes !== undefined || data.cron !== undefined, {
+  message: "Either intervalMinutes or cron is required",
+  path: ["intervalMinutes"],
 });
 
 /**

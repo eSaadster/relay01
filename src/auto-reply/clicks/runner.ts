@@ -4,13 +4,10 @@ import {
   Agent,
 } from "@earendil-works/pi-agent-core";
 import { getModel, type TextContent } from "@earendil-works/pi-ai";
-import { findModel } from "../pi-agent.js";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 
 import { logVerbose } from "../../globals.js";
 import { loadSessionEnv } from "../../index.js";
+import { createGetApiKey, findModel } from "../pi-agent.js";
 import { createTools, SLACK_BASE_PATH } from "../pi-agent-tools.js";
 import { discoverConventionSkills, getSkillRegistry } from "../skills/index.js";
 import { loadClickState, saveClickResult, updateStateAfterRun } from "./state.js";
@@ -18,100 +15,9 @@ import type { ClickConfig, ClickContext, ClickResult } from "./types.js";
 
 const CLICK_TIMEOUT_MS = 300000; // 5 minutes
 const DEFAULT_MODEL = "claude-sonnet-4-6";
-const OAUTH_PATH = path.join(os.homedir(), ".pi", "agent", "oauth.json");
-const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
-interface ProviderAuth {
-  type: string;
-  refresh?: string;
-  access: string;
-  expires?: number;
-}
-
-interface OAuthConfig {
-  anthropic?: ProviderAuth;
-  [provider: string]: ProviderAuth | undefined;
-}
-
-/**
- * Refresh Anthropic OAuth token if needed.
- */
-async function refreshAnthropicToken(
-  refreshToken: string
-): Promise<{ access: string; refresh: string; expires: number }> {
-  logVerbose("Refreshing Anthropic OAuth token for click...");
-
-  const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "refresh_token",
-      client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-      refresh_token: refreshToken,
-    }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Token refresh failed: ${response.status} ${text}`);
-  }
-
-  const data = (await response.json()) as {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-  };
-
-  return {
-    access: data.access_token,
-    refresh: data.refresh_token,
-    expires: Date.now() + data.expires_in * 1000,
-  };
-}
-
-/**
- * Load OAuth config with token refresh.
- */
-async function loadOAuth(): Promise<OAuthConfig> {
-  const content = await fs.readFile(OAUTH_PATH, "utf8");
-  const oauth: OAuthConfig = JSON.parse(content);
-
-  if (oauth.anthropic) {
-    const now = Date.now();
-    const expires = oauth.anthropic.expires ?? 0;
-
-    if (expires - now < TOKEN_REFRESH_BUFFER_MS && oauth.anthropic.refresh) {
-      try {
-        const newTokens = await refreshAnthropicToken(oauth.anthropic.refresh);
-        oauth.anthropic.access = newTokens.access;
-        oauth.anthropic.refresh = newTokens.refresh;
-        oauth.anthropic.expires = newTokens.expires;
-        await fs.writeFile(OAUTH_PATH, JSON.stringify(oauth, null, 2));
-      } catch (err) {
-        logVerbose(`Token refresh failed: ${err}`);
-      }
-    }
-  }
-
-  return oauth;
-}
-
-/**
- * Create getApiKey function for agent.
- */
-function createGetApiKey(): (provider: string) => Promise<string | undefined> {
-  return async (provider: string) => {
-    // Check for provider-specific API keys via env vars
-    // Common patterns: ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, etc.
-    const envKeyName = `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
-    if (process.env[envKeyName]) {
-      return process.env[envKeyName];
-    }
-
-    // Fall back to OAuth config
-    const oauth = await loadOAuth();
-    return (oauth as Record<string, ProviderAuth | undefined>)[provider]?.access;
-  };
+function shouldAlwaysAlert(click: ClickConfig): boolean {
+  return click.alertCriteria?.trim().toUpperCase() === "ALWAYS";
 }
 
 /**
@@ -139,6 +45,10 @@ function buildClickPrompt(click: ClickConfig, lastRunTime?: number): string {
     prompt += `**Alert Criteria:**\nUse your judgment to decide if this warrants alerting the user. Only alert for important, actionable findings.\n\n`;
   }
 
+  const alertInstruction = shouldAlwaysAlert(click)
+    ? "- Set shouldAlert to true (alert criteria is ALWAYS)\n"
+    : "- Set shouldAlert to true ONLY if the alert criteria are met\n";
+
   prompt += `After executing, you MUST respond with a JSON block in this exact format:
 \`\`\`json
 {
@@ -149,18 +59,55 @@ function buildClickPrompt(click: ClickConfig, lastRunTime?: number): string {
 \`\`\`
 
 Important:
-- Set shouldAlert to true ONLY if the alert criteria are met
-- Keep summary concise (under 100 characters)
-- Include relevant details in the details field
+${alertInstruction}- Keep summary to one headline line
+- Put the full formatted briefing (all sections, issue IDs, assignees) in the details field
 `;
 
   return prompt;
 }
 
 /**
+ * Extract the assistant response text from the current agent turn.
+ */
+function extractAssistantResponse(agent: Agent): {
+  responseText: string;
+  error?: string;
+} {
+  const messages = agent.state.messages;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if ("role" in msg && msg.role === "user") break;
+
+    if ("stopReason" in msg && msg.stopReason === "error") {
+      const errorMessage =
+        ("errorMessage" in msg && typeof msg.errorMessage === "string"
+          ? msg.errorMessage
+          : undefined) || "Agent returned an error with no message";
+      return { responseText: "", error: errorMessage };
+    }
+
+    if ("content" in msg && Array.isArray(msg.content)) {
+      const texts = msg.content
+        .filter((c): c is TextContent => c.type === "text")
+        .map((c) => c.text)
+        .filter((t) => t.trim().length > 0);
+      if (texts.length > 0) {
+        return { responseText: texts.join("\n") };
+      }
+    }
+  }
+
+  return { responseText: "" };
+}
+
+/**
  * Parse the agent's response to extract click result.
  */
-function parseClickResponse(responseText: string): {
+function parseClickResponse(
+  responseText: string,
+  click: ClickConfig
+): {
   shouldAlert: boolean;
   summary: string;
   details: string;
@@ -171,11 +118,15 @@ function parseClickResponse(responseText: string): {
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[1]);
-      return {
+      const result = {
         shouldAlert: Boolean(parsed.shouldAlert),
         summary: String(parsed.summary || "No summary provided"),
         details: String(parsed.details || "No details provided"),
       };
+      if (shouldAlwaysAlert(click)) {
+        result.shouldAlert = true;
+      }
+      return result;
     } catch {
       // JSON parse failed, fall through
     }
@@ -188,17 +139,32 @@ function parseClickResponse(responseText: string): {
   if (rawJsonMatch) {
     try {
       const parsed = JSON.parse(rawJsonMatch[0]);
-      return {
+      const result = {
         shouldAlert: Boolean(parsed.shouldAlert),
         summary: String(parsed.summary || "No summary provided"),
         details: String(parsed.details || "No details provided"),
       };
+      if (shouldAlwaysAlert(click)) {
+        result.shouldAlert = true;
+      }
+      return result;
     } catch {
       // JSON parse failed
     }
   }
 
-  // Fallback: treat entire response as details, don't alert
+  if (responseText.trim()) {
+    const result = {
+      shouldAlert: shouldAlwaysAlert(click),
+      summary: shouldAlwaysAlert(click)
+        ? "Click summary"
+        : "Response missing structured JSON",
+      details: responseText,
+    };
+    return result;
+  }
+
+  // Fallback: no usable response
   return {
     shouldAlert: false,
     summary: "Unable to parse structured response",
@@ -294,31 +260,14 @@ Be concise and focus on the task at hand.
     await Promise.race([agent.prompt(prompt), timeoutPromise]);
     await agent.waitForIdle();
 
-    // Extract text from the LAST assistant message that has text content
-    // Walk backwards to find it, skipping empty messages after tool calls
-    const messages = agent.state.messages;
-    let responseText = "";
+    const { responseText, error } = extractAssistantResponse(agent);
 
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      // Stop when we hit a user message (start of current turn)
-      if ("role" in msg && msg.role === "user") break;
-
-      // Check if this assistant message has text content
-      if ("content" in msg && Array.isArray(msg.content)) {
-        const texts = msg.content
-          .filter((c): c is TextContent => c.type === "text")
-          .map((c) => c.text)
-          .filter((t) => t.trim().length > 0);
-        if (texts.length > 0) {
-          responseText = texts.join("\n");
-          break; // Found the last message with text, stop here
-        }
-      }
+    if (error) {
+      throw new Error(error);
     }
 
     // Parse response
-    const parsed = parseClickResponse(responseText);
+    const parsed = parseClickResponse(responseText, click);
 
     const result: ClickResult = {
       shouldAlert: parsed.shouldAlert,
