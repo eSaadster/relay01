@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import * as log from "./log.js";
 import { MomBot, type SlackContext, type FeedbackEvent, type BlockActionEvent, type SlashCommandEvent, type SlashRespond } from "./slack.js";
 import { getApprovalManager } from "../auto-reply/approvals.js";
+import { formatAttachmentsPrompt } from "./attachments-prompt.js";
 import { getPiAgentManager, PiAgentManager, type PiAgentConfig, type ToolActivity } from "../auto-reply/pi-agent.js";
 import { type Step, renderStepChecklist } from "./checklist.js";
 import { initializeSkills } from "../auto-reply/skills/index.js";
@@ -205,14 +206,9 @@ async function handleMessage(ctx: SlackContext, source: "channel" | "dm"): Promi
 	setBlockRenderer(sessionName, ctx.respondBlocks);
 
 	try {
-		// Build message with attachment info if present
-		let messageText = ctx.message.text;
-		if (ctx.message.attachments.length > 0) {
-			const attachmentList = ctx.message.attachments
-				.map((a) => `- ${a.original} → ${a.local}`)
-				.join("\n");
-			messageText += `\n\n[Attachments downloaded to scratchpad/attachments/]\n${attachmentList}`;
-		}
+		// Build message with attachment info if present (with file-type hints,
+		// e.g. CSV → render a chart)
+		const messageText = ctx.message.text + formatAttachmentsPrompt(ctx.message.attachments);
 
 		// Use Pi Agent Manager to get response
 		// sessionName determines context isolation: @username for DMs, #channelname for channels
