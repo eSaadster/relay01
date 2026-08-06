@@ -50,6 +50,18 @@ export interface MomHandler {
 export type FeedbackEvent = { sessionName: string; positive: boolean; text: string; wasBot: boolean };
 export type OnFeedback = (e: FeedbackEvent) => Promise<void>;
 
+export type SlashCommandEvent = {
+	command: string; // e.g. "/relay"
+	text: string; // everything after the command
+	userId: string;
+	userName: string;
+	channelId: string;
+	channelName: string; // without #; "directmessage" for DMs
+};
+/** Reply to a slash command (ephemeral by default; inChannel=true posts publicly). */
+export type SlashRespond = (text: string, inChannel?: boolean) => Promise<void>;
+export type OnSlashCommand = (e: SlashCommandEvent, respond: SlashRespond) => Promise<void>;
+
 export type BlockActionEvent = {
 	actionId: string;
 	userId: string;
@@ -65,6 +77,7 @@ export interface MomBotConfig {
 	workingDir: string; // directory for channel data and attachments
 	onFeedback?: OnFeedback;
 	onBlockAction?: OnBlockAction;
+	onSlashCommand?: OnSlashCommand;
 }
 
 export interface ChannelInfo {
@@ -94,11 +107,13 @@ export class MomBot {
 	private static readonly MAX_SUBSCRIPTIONS = 500;
 	private onFeedback?: OnFeedback;
 	private onBlockAction?: OnBlockAction;
+	private onSlashCommand?: OnSlashCommand;
 
 	constructor(handler: MomHandler, config: MomBotConfig) {
 		this.handler = handler;
 		this.onFeedback = config.onFeedback;
 		this.onBlockAction = config.onBlockAction;
+		this.onSlashCommand = config.onSlashCommand;
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
 		this.store = new ChannelStore({
@@ -415,6 +430,47 @@ export class MomBot {
 					files: slackEvent.files,
 				}, "channel");
 				await this.handler.onChannelMention(ctx);
+			}
+		});
+
+		// Handle slash commands (e.g. /relay status). Ack within 3s, then reply
+		// asynchronously via response_url (valid for 30 min), so slow
+		// subcommands like click runs don't hit the ack deadline.
+		this.socketClient.on("slash_commands", async ({ body, ack }) => {
+			await ack();
+			const e = body as {
+				command?: string;
+				text?: string;
+				user_id?: string;
+				user_name?: string;
+				channel_id?: string;
+				channel_name?: string;
+				response_url?: string;
+			};
+			if (!this.onSlashCommand || !e.command || !e.response_url) return;
+			const responseUrl = e.response_url;
+			const respond: SlashRespond = async (text: string, inChannel = false) => {
+				await fetch(responseUrl, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ response_type: inChannel ? "in_channel" : "ephemeral", text }),
+				});
+			};
+			try {
+				await this.onSlashCommand(
+					{
+						command: e.command,
+						text: (e.text ?? "").trim(),
+						userId: e.user_id ?? "",
+						userName: e.user_name ?? "",
+						channelId: e.channel_id ?? "",
+						channelName: e.channel_name ?? "",
+					},
+					respond,
+				);
+			} catch (error) {
+				log.logWarning("Slash command handler failed", String(error));
+				await respond(`Error: ${String(error)}`).catch(() => {});
 			}
 		});
 

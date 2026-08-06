@@ -2,7 +2,7 @@
 
 import { join, resolve } from "path";
 import * as log from "./log.js";
-import { MomBot, type SlackContext, type FeedbackEvent, type BlockActionEvent } from "./slack.js";
+import { MomBot, type SlackContext, type FeedbackEvent, type BlockActionEvent, type SlashCommandEvent, type SlashRespond } from "./slack.js";
 import { getApprovalManager } from "../auto-reply/approvals.js";
 import { getPiAgentManager, PiAgentManager, type PiAgentConfig, type ToolActivity } from "../auto-reply/pi-agent.js";
 import { type Step, renderStepChecklist } from "./checklist.js";
@@ -269,6 +269,118 @@ async function handleMessage(ctx: SlackContext, source: "channel" | "dm"): Promi
 	}
 }
 
+const SLASH_HELP = [
+	"*`/relay` commands:*",
+	"• `/relay status` — bot status: model, active runs, clicks, events",
+	"• `/relay clicks` — scheduled clicks for this channel/DM (`/relay clicks all` for every session)",
+	"• `/relay click run <id>` — trigger a click now",
+	"• `/relay clicks reload` — reload this session's clicks.json (`/relay clicks reload all` for all)",
+	"• `/relay events` — active events for this channel/DM",
+	"• `/relay event run <file>` — trigger an event now",
+	"• `/relay stop` — cancel the active agent run in this channel",
+].join("\n");
+
+async function handleSlashCommand(e: SlashCommandEvent, respond: SlashRespond): Promise<void> {
+	// Session naming mirrors handleMessage: #channel for channels, @user for DMs
+	const isDm = e.channelName === "directmessage";
+	const sessionName = isDm ? `@${e.userName}` : `#${e.channelName}`;
+	const [sub, ...rest] = e.text.split(/\s+/).filter(Boolean);
+
+	switch ((sub ?? "help").toLowerCase()) {
+		case "status": {
+			const clickScheduler = getClickScheduler();
+			const eventsWatcher = getEventsWatcher();
+			const clicks = clickScheduler.getStatus();
+			const events = eventsWatcher.getStatus();
+			const lines = [
+				"*relay01 status*",
+				`Model: \`${process.env.PI_AGENT_MODEL ?? "default"}\``,
+				`Active runs: ${activeRuns.size}${activeRuns.size > 0 ? ` (${[...activeRuns].join(", ")})` : ""}`,
+				`Clicks scheduled: ${clicks.length}`,
+				`Events active: ${events.length}`,
+			];
+			await respond(lines.join("\n"));
+			return;
+		}
+		case "clicks": {
+			const arg = (rest[0] ?? "").toLowerCase();
+			const clickScheduler = getClickScheduler();
+			if (arg === "reload") {
+				const all = (rest[1] ?? "").toLowerCase() === "all";
+				await clickScheduler.reload(all ? undefined : sessionName);
+				const status = all
+					? clickScheduler.getStatus()
+					: clickScheduler.getStatus().filter((s) => s.key.startsWith(sessionName));
+				await respond(`Clicks reloaded. ${status.length} click(s) scheduled${all ? " across all sessions" : " for this session"}.`);
+				return;
+			}
+			const all = arg === "all";
+			const status = all
+				? clickScheduler.getStatus()
+				: clickScheduler.getStatus().filter((s) => s.key.startsWith(sessionName));
+			if (status.length === 0) {
+				await respond(all ? "No clicks scheduled." : `No clicks scheduled for ${sessionName}.`);
+				return;
+			}
+			await respond(status.map((s) => `• \`${s.key}\``).join("\n"));
+			return;
+		}
+		case "click": {
+			if ((rest[0] ?? "").toLowerCase() !== "run" || !rest[1]) {
+				await respond("Usage: `/relay click run <click-id>`");
+				return;
+			}
+			const clickId = rest[1];
+			await respond(`Triggering click \`${clickId}\`...`);
+			const result = await getClickScheduler().triggerClick(sessionName, clickId);
+			if (!result) {
+				await respond(`Click \`${clickId}\` not found for ${sessionName}.`);
+			} else if (result.error) {
+				await respond(`Click \`${clickId}\` failed: ${result.error}`);
+			} else {
+				const alertStatus = result.shouldAlert ? "🚨 ALERT" : "✓ OK";
+				const body = result.details.trim() || result.summary;
+				await respond(`Click \`${clickId}\` completed: ${alertStatus}\n\n${body.slice(0, 2500)}`);
+			}
+			return;
+		}
+		case "events": {
+			const status = getEventsWatcher().getStatus().filter((s) => s.sessionName === sessionName);
+			await respond(
+				status.length === 0
+					? `No active events for ${sessionName}.`
+					: status.map((s) => `• \`${s.key}\` (${s.type})`).join("\n"),
+			);
+			return;
+		}
+		case "event": {
+			if ((rest[0] ?? "").toLowerCase() !== "run" || !rest[1]) {
+				await respond("Usage: `/relay event run <filename.json>`");
+				return;
+			}
+			const filename = rest[1].endsWith(".json") ? rest[1] : `${rest[1]}.json`;
+			await respond(`Triggering event \`${filename}\`...`);
+			const result = await getEventsWatcher().triggerEvent(sessionName, filename);
+			if (!result) await respond(`Event \`${filename}\` not found.`);
+			else if (result.error) await respond(`Event \`${filename}\` failed: ${result.error}`);
+			else await respond(`Event \`${filename}\` completed ${result.silent ? "(silent)" : "✓"}`);
+			return;
+		}
+		case "stop": {
+			if (activeRuns.has(e.channelId)) {
+				manager.resetSession(sessionName);
+				activeRuns.delete(e.channelId);
+				await respond("Stopped the active run.", true);
+			} else {
+				await respond("Nothing running in this channel.");
+			}
+			return;
+		}
+		default:
+			await respond(SLASH_HELP);
+	}
+}
+
 async function onFeedback({ sessionName, positive, text, wasBot }: FeedbackEvent) {
 	// Only record feedback for reactions on the bot's own messages. A 👍/👎 on
 	// another user's message says nothing about the bot's responses.
@@ -295,6 +407,7 @@ const bot = new MomBot(
 		onBlockAction: async (e: BlockActionEvent) => {
 			await getApprovalManager().handleAction(e.actionId, e.userName);
 		},
+		onSlashCommand: handleSlashCommand,
 	},
 );
 
