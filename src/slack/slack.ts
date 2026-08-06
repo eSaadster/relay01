@@ -50,11 +50,21 @@ export interface MomHandler {
 export type FeedbackEvent = { sessionName: string; positive: boolean; text: string; wasBot: boolean };
 export type OnFeedback = (e: FeedbackEvent) => Promise<void>;
 
+export type BlockActionEvent = {
+	actionId: string;
+	userId: string;
+	userName: string; // display name, e.g. @handle
+	channel?: string;
+	messageTs?: string;
+};
+export type OnBlockAction = (e: BlockActionEvent) => Promise<void>;
+
 export interface MomBotConfig {
 	appToken: string;
 	botToken: string;
 	workingDir: string; // directory for channel data and attachments
 	onFeedback?: OnFeedback;
+	onBlockAction?: OnBlockAction;
 }
 
 export interface ChannelInfo {
@@ -77,10 +87,12 @@ export class MomBot {
 	private userCache: Map<string, { userName: string; displayName: string }> = new Map();
 	private channelCache: Map<string, string> = new Map(); // id -> name
 	private onFeedback?: OnFeedback;
+	private onBlockAction?: OnBlockAction;
 
 	constructor(handler: MomHandler, config: MomBotConfig) {
 		this.handler = handler;
 		this.onFeedback = config.onFeedback;
+		this.onBlockAction = config.onBlockAction;
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
 		this.store = new ChannelStore({
@@ -355,6 +367,35 @@ export class MomBot {
 					files: slackEvent.files,
 				}, "dm");
 				await this.handler.onDirectMessage(ctx);
+			}
+		});
+
+		// Handle interactive block actions (e.g. approval buttons)
+		this.socketClient.on("interactive", async ({ body, ack }) => {
+			await ack();
+			const payload = body as {
+				type?: string;
+				user?: { id?: string; username?: string; name?: string };
+				actions?: Array<{ action_id?: string }>;
+				channel?: { id?: string };
+				message?: { ts?: string };
+			};
+			if (payload.type !== "block_actions" || !this.onBlockAction) return;
+			const userId = payload.user?.id ?? "";
+			const userName = payload.user?.username || payload.user?.name || userId;
+			for (const action of payload.actions ?? []) {
+				if (!action.action_id) continue;
+				try {
+					await this.onBlockAction({
+						actionId: action.action_id,
+						userId,
+						userName: userName.startsWith("@") ? userName : `@${userName}`,
+						channel: payload.channel?.id,
+						messageTs: payload.message?.ts,
+					});
+				} catch (error) {
+					log.logWarning("Block action handler failed", String(error));
+				}
 			}
 		});
 

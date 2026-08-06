@@ -1753,6 +1753,47 @@ intermediate results, and unprompted outreach only.`,
 }
 
 /**
+ * Wrap a tool so calls matching the session's approvals.json rules pause for
+ * an Approve/Deny click in Slack before executing. Reads and unmatched calls
+ * pass straight through. Config is re-read per call, so edits apply live.
+ */
+function withApprovalGate(tool: AgentTool<any>, sessionName: string): AgentTool<any> {
+  const execute = tool.execute;
+  return {
+    ...tool,
+    execute: async (toolCallId: string, params: any, signal?: AbortSignal): Promise<AgentToolResult<any>> => {
+      // Lazy import to avoid a circular dependency at module load time
+      const approvals = await import("./approvals.js");
+      const config = approvals.loadApprovalConfig(sessionName);
+      const descriptor = approvals.callDescriptor(tool.name, params);
+      if (!approvals.requiresApproval(config, descriptor)) {
+        return execute(toolCallId, params, signal as any);
+      }
+
+      const argsJson = JSON.stringify(params ?? {}, null, 2);
+      const summary = `*${tool.label ?? tool.name}*\n\`\`\`${argsJson.slice(0, 1500)}\`\`\``;
+      console.log(`[approvals] Gated call ${descriptor} in ${sessionName}, awaiting approval`);
+      const outcome = await approvals.getApprovalManager().requestApproval({
+        sessionName,
+        descriptor,
+        summary,
+        timeoutSeconds: config!.timeoutSeconds,
+      });
+
+      if (!outcome.approved) {
+        const reason = outcome.timedOut ? "the approval request timed out" : "a human denied the request";
+        return {
+          content: [{ type: "text", text: `Call to ${descriptor} was NOT executed: ${reason}. Do not retry the same call; tell the user and ask how to proceed.` }],
+          details: undefined,
+        };
+      }
+      console.log(`[approvals] ${descriptor} approved${outcome.by ? ` by ${outcome.by}` : ""}`);
+      return execute(toolCallId, params, signal as any);
+    },
+  };
+}
+
+/**
  * Create all tools for a session with proper sandbox isolation.
  * Each session gets its own tool instances with sessionCwd captured in closures.
  * This prevents race conditions when multiple sessions run concurrently.
@@ -1794,7 +1835,9 @@ export function createTools(
     tools.push(createCanvasEditTool(options.canvas));
     tools.push(createCanvasSectionsLookupTool(options.canvas));
   }
-  return renameBlockedToolsForOAuth(tools);
+  // Approval gate wraps under the original (pre-rename) tool names so
+  // approvals.json rules stay stable regardless of OAuth renames.
+  return renameBlockedToolsForOAuth(tools.map((t) => withApprovalGate(t, sessionName)));
 }
 
 /**

@@ -2,7 +2,8 @@
 
 import { join, resolve } from "path";
 import * as log from "./log.js";
-import { MomBot, type SlackContext, type FeedbackEvent } from "./slack.js";
+import { MomBot, type SlackContext, type FeedbackEvent, type BlockActionEvent } from "./slack.js";
+import { getApprovalManager } from "../auto-reply/approvals.js";
 import { getPiAgentManager, PiAgentManager, type PiAgentConfig, type ToolActivity } from "../auto-reply/pi-agent.js";
 import { type Step, renderStepChecklist } from "./checklist.js";
 import { initializeSkills } from "../auto-reply/skills/index.js";
@@ -291,6 +292,9 @@ const bot = new MomBot(
 		botToken: SLACK_BOT_TOKEN,
 		workingDir,
 		onFeedback,
+		onBlockAction: async (e: BlockActionEvent) => {
+			await getApprovalManager().handleAction(e.actionId, e.userName);
+		},
 	},
 );
 
@@ -346,6 +350,12 @@ const bot = new MomBot(
 	});
 	// Resume any runs that were active before restart
 	await getAgentManager().resumeActiveRuns();
+
+	// Configure the write-approval gate (gates tool calls per approvals.json)
+	getApprovalManager().configure({
+		webClient: bot.getWebClient(),
+		getSessionChannelId,
+	});
 
 	// Initialize click scheduler for proactive polling
 	const clickScheduler = getClickScheduler();

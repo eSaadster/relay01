@@ -1,0 +1,11 @@
+{
+  "_comment": "Write-approval gate. Copy to ~/relay01/slack/approvals.json (global) or ~/relay01/slack/<session>/approvals.json (per channel/DM). Gated tool calls pause on an Approve/Deny button in Slack; no file or empty rules means nothing is gated. Rules match tool names, or MCP calls as mcp:<server>:<tool>, with * wildcards.",
+  "rules": [
+    "mcp:linear:*create*",
+    "mcp:linear:*update*",
+    "mcp:linear:*delete*",
+    "mcp:notion:*create*",
+    "mcp:notion:*update*"
+  ],
+  "timeoutSeconds": 300
+}

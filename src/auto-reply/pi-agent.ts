@@ -864,8 +864,24 @@ export class PiAgentManager {
       ): Promise<string> => {
         activeAttempt = attempt;
 
+        // Countdown that pauses while a write-approval is waiting on a human,
+        // so a slow Approve/Deny decision can't kill the run mid-tool-call.
         const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error("Agent timeout")), attemptTimeoutMs);
+          const tickMs = 5000;
+          let remaining = attemptTimeoutMs;
+          const tick = async () => {
+            try {
+              const { getApprovalManager } = await import("./approvals.js");
+              if (!getApprovalManager().hasPendingForSession(sessionName)) {
+                remaining -= tickMs;
+              }
+            } catch {
+              remaining -= tickMs;
+            }
+            if (remaining <= 0) reject(new Error("Agent timeout"));
+            else setTimeout(tick, Math.min(tickMs, remaining));
+          };
+          setTimeout(tick, Math.min(tickMs, remaining));
         });
 
         await Promise.race([agent.prompt(promptMessage), timeoutPromise]);
