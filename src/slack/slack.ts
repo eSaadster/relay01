@@ -86,6 +86,12 @@ export class MomBot {
 	public readonly store: ChannelStore;
 	private userCache: Map<string, { userName: string; displayName: string }> = new Map();
 	private channelCache: Map<string, string> = new Map(); // id -> name
+	// Threads the bot participates in: replies here trigger it without a
+	// re-mention (OpenTag-style thread subscription). Key `${channel}:${threadTs}`
+	// → subscription time, pruned after SUBSCRIPTION_TTL_MS. In-memory only.
+	private subscribedThreads: Map<string, number> = new Map();
+	private static readonly SUBSCRIPTION_TTL_MS = 24 * 60 * 60 * 1000;
+	private static readonly MAX_SUBSCRIPTIONS = 500;
 	private onFeedback?: OnFeedback;
 	private onBlockAction?: OnBlockAction;
 
@@ -296,6 +302,26 @@ export class MomBot {
 		}
 	}
 
+	/** Subscribe the bot to a thread so unmentioned replies there trigger it. */
+	private subscribeThread(channel: string, threadTs: string): void {
+		const now = Date.now();
+		// Prune expired entries, and the oldest when at capacity
+		for (const [key, at] of this.subscribedThreads) {
+			if (now - at > MomBot.SUBSCRIPTION_TTL_MS) this.subscribedThreads.delete(key);
+		}
+		if (this.subscribedThreads.size >= MomBot.MAX_SUBSCRIPTIONS) {
+			const oldest = this.subscribedThreads.keys().next().value;
+			if (oldest) this.subscribedThreads.delete(oldest);
+		}
+		this.subscribedThreads.set(`${channel}:${threadTs}`, now);
+	}
+
+	private isSubscribedThread(channel: string, threadTs?: string): boolean {
+		if (!threadTs) return false;
+		const at = this.subscribedThreads.get(`${channel}:${threadTs}`);
+		return at !== undefined && Date.now() - at <= MomBot.SUBSCRIPTION_TTL_MS;
+	}
+
 	private setupEventHandlers(): void {
 		// Handle @mentions in channels
 		this.socketClient.on("app_mention", async ({ event, ack }) => {
@@ -306,6 +332,7 @@ export class MomBot {
 				channel: string;
 				user: string;
 				ts: string;
+				thread_ts?: string;
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
 
@@ -317,6 +344,9 @@ export class MomBot {
 				ts: slackEvent.ts,
 				files: slackEvent.files,
 			});
+
+			// Once mentioned in a thread, follow the rest of that thread
+			this.subscribeThread(slackEvent.channel, slackEvent.thread_ts ?? slackEvent.ts);
 
 			const ctx = await this.createContext(slackEvent, "channel");
 			await this.handler.onChannelMention(ctx);
@@ -331,6 +361,7 @@ export class MomBot {
 				channel: string;
 				user?: string;
 				ts: string;
+				thread_ts?: string;
 				channel_type?: string;
 				subtype?: string;
 				bot_id?: string;
@@ -367,6 +398,23 @@ export class MomBot {
 					files: slackEvent.files,
 				}, "dm");
 				await this.handler.onDirectMessage(ctx);
+				return;
+			}
+
+			// Thread subscription: unmentioned replies in a thread the bot
+			// participates in trigger it like a mention. Mentions themselves are
+			// skipped here — the app_mention event already handles them.
+			const mentionsBot = !!this.botUserId && (slackEvent.text ?? "").includes(`<@${this.botUserId}>`);
+			if (!mentionsBot && this.isSubscribedThread(slackEvent.channel, slackEvent.thread_ts)) {
+				const ctx = await this.createContext({
+					text: slackEvent.text || "",
+					channel: slackEvent.channel,
+					user: slackEvent.user,
+					ts: slackEvent.ts,
+					thread_ts: slackEvent.thread_ts,
+					files: slackEvent.files,
+				}, "channel");
+				await this.handler.onChannelMention(ctx);
 			}
 		});
 
@@ -481,8 +529,11 @@ export class MomBot {
 		channel: string;
 		user: string;
 		ts: string;
+		thread_ts?: string;
 		files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 	}, source: "channel" | "dm"): Promise<SlackContext> {
+		// When the trigger came from inside a thread, respond in that thread.
+		const replyThreadTs = source === "channel" ? event.thread_ts : undefined;
 		const rawText = event.text;
 		const text = rawText.replace(/<@[A-Z0-9]+>/gi, "").trim();
 
@@ -555,9 +606,14 @@ export class MomBot {
 				const result = await this.webClient.chat.postMessage({
 					channel: event.channel,
 					text: chunks[0],
+					...(replyThreadTs ? { thread_ts: replyThreadTs } : {}),
 					...(opts?.blocks ? { blocks: opts.blocks as any } : {}),
 				});
 				messageTs = result.ts as string;
+				// Follow replies to the bot's own top-level responses in channels
+				if (source === "channel" && !replyThreadTs && messageTs) {
+					this.subscribeThread(event.channel, messageTs);
+				}
 			}
 
 			const neededOverflow = chunks.length - 1;
@@ -635,8 +691,12 @@ export class MomBot {
 					const result = await this.webClient.chat.postMessage({
 						channel: event.channel,
 						text: accumulatedText,
+						...(replyThreadTs ? { thread_ts: replyThreadTs } : {}),
 					});
 					messageTs = result.ts as string;
+					if (source === "channel" && !replyThreadTs && messageTs) {
+						this.subscribeThread(event.channel, messageTs);
+					}
 				}
 				// We don't delete/clear anymore - message persists and gets updated
 			},
