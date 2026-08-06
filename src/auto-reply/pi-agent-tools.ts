@@ -962,6 +962,76 @@ function createRenderChartTool(ctx: SessionContext): AgentTool<typeof renderChar
 }
 
 // ============================================================================
+// Render Diagram Tool (mermaid/graphviz/plantuml via Kroki → PNG upload)
+// ============================================================================
+
+const renderDiagramSchema = Type.Object({
+  format: Type.Union([Type.Literal("mermaid"), Type.Literal("graphviz"), Type.Literal("plantuml")], {
+    description: "Diagram language of `source`",
+  }),
+  source: Type.String({ description: "Diagram source, e.g. mermaid 'flowchart TD; A-->B'" }),
+  filename: Type.Optional(Type.String({ description: "Output filename (default: auto-generated)" })),
+});
+
+function createRenderDiagramTool(ctx: SessionContext): AgentTool<typeof renderDiagramSchema, undefined> {
+  return {
+    name: "render_diagram",
+    label: "Render Diagram",
+    description:
+      "Render a diagram (mermaid flowchart/sequence/gantt, graphviz dot, or plantuml) to a PNG image and upload it to the current Slack channel. Rendered via hosted APIs (mermaid.ink / kroki.io), so it needs network access.",
+    parameters: renderDiagramSchema,
+    execute: async (_toolCallId, params: Static<typeof renderDiagramSchema>): Promise<AgentToolResult<undefined>> => {
+      try {
+        // kroki.io's mermaid companion service is unreliable; mermaid.ink is the
+        // dedicated mermaid renderer, so route mermaid there and the rest to kroki.
+        let response: Response;
+        if (params.format === "mermaid") {
+          const encoded = Buffer.from(JSON.stringify({ code: params.source, mermaid: { theme: "default" } })).toString("base64url");
+          response = await fetch(`https://mermaid.ink/img/${encoded}?type=png`, {
+            signal: AbortSignal.timeout(30000),
+          });
+        } else {
+          const krokiBase = process.env.KROKI_URL || "https://kroki.io";
+          response = await fetch(`${krokiBase}/${params.format}/png`, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: params.source,
+            signal: AbortSignal.timeout(30000),
+          });
+        }
+        if (!response.ok) {
+          const detail = (await response.text()).slice(0, 500);
+          return {
+            content: [{ type: "text", text: `Diagram rendering failed (HTTP ${response.status}): ${detail}` }],
+            details: undefined,
+          };
+        }
+        const png = Buffer.from(await response.arrayBuffer());
+
+        const outputDir = path.join(ctx.sessionCwd, "diagrams");
+        await fs.mkdir(outputDir, { recursive: true });
+        const filename = params.filename || `${params.format}_${Date.now()}.png`;
+        const outputPath = path.join(outputDir, filename.endsWith(".png") ? filename : `${filename}.png`);
+        await fs.writeFile(outputPath, png);
+
+        const uploadFunction = uploadFunctions.get(ctx.sessionName);
+        if (uploadFunction) {
+          await uploadFunction(outputPath);
+          return { content: [{ type: "text", text: `Diagram rendered and uploaded.\nPath: ${outputPath}` }], details: undefined };
+        }
+        return {
+          content: [{ type: "text", text: `Diagram rendered.\nPath: ${outputPath}\nUse MEDIA:${outputPath} to send it.` }],
+          details: undefined,
+        };
+      } catch (err: any) {
+        const msg = err.name === "TimeoutError" ? "Diagram rendering timed out (30s)." : `Error rendering diagram: ${err.message || String(err)}`;
+        return { content: [{ type: "text", text: msg }], details: undefined };
+      }
+    },
+  };
+}
+
+// ============================================================================
 // Generate Image Tool (Text-to-Image via Gemini)
 // ============================================================================
 
@@ -1708,6 +1778,7 @@ export function createTools(
     getCurrentTimeTool,
     createRenderUiTool(ctx),
     createRenderChartTool(ctx),
+    createRenderDiagramTool(ctx),
     // These tools need session context
     createAttachTool(ctx),
     createGenerateImageTool(ctx),
