@@ -892,6 +892,76 @@ function createRenderUiTool(ctx: SessionContext): AgentTool<typeof renderUiSchem
 }
 
 // ============================================================================
+// Render Chart Tool (SVG → PNG via sharp, uploaded to Slack)
+// ============================================================================
+
+const chartSeriesSchema = Type.Object({
+  name: Type.String({ description: "Series name (shown in the legend)" }),
+  values: Type.Array(Type.Number(), { description: "One value per label, in label order" }),
+});
+
+const renderChartSchema = Type.Object({
+  type: Type.Union([Type.Literal("bar"), Type.Literal("line"), Type.Literal("pie")], {
+    description: "bar = magnitude comparison, line = change over time, pie = parts of a whole (single series)",
+  }),
+  title: Type.Optional(Type.String({ description: "Chart title" })),
+  labels: Type.Array(Type.String(), { description: "Category / x-axis labels (pie: slice labels)" }),
+  series: Type.Array(chartSeriesSchema, { description: "Data series (max 8; pie uses only the first)" }),
+  filename: Type.Optional(Type.String({ description: "Output filename (default: auto-generated)" })),
+});
+
+function createRenderChartTool(ctx: SessionContext): AgentTool<typeof renderChartSchema, undefined> {
+  return {
+    name: "render_chart",
+    label: "Render Chart",
+    description:
+      "Render a real chart (bar, line, or pie) as a PNG image and upload it to the current Slack channel. Prefer this over render_ui's unicode bars for anything beyond a quick comparison.",
+    parameters: renderChartSchema,
+    execute: async (_toolCallId, params: Static<typeof renderChartSchema>): Promise<AgentToolResult<undefined>> => {
+      try {
+        const { chartToSvg, MAX_SERIES } = await import("../media/svg-chart.js");
+        const sharp = (await import("sharp")).default;
+
+        const svg = chartToSvg({
+          type: params.type,
+          title: params.title,
+          labels: params.labels,
+          series: params.series,
+        });
+
+        const outputDir = path.join(ctx.sessionCwd, "charts");
+        await fs.mkdir(outputDir, { recursive: true });
+        const safeTitle = (params.title ?? params.type).slice(0, 40).replace(/[^a-zA-Z0-9]/g, "_").toLowerCase();
+        const filename = params.filename || `${safeTitle}_${Date.now()}.png`;
+        const outputPath = path.join(outputDir, filename.endsWith(".png") ? filename : `${filename}.png`);
+
+        // Rasterize at 2x for crisp text in Slack previews.
+        const png = await sharp(Buffer.from(svg), { density: 144 }).png().toBuffer();
+        await fs.writeFile(outputPath, png);
+
+        const uploadFunction = uploadFunctions.get(ctx.sessionName);
+        let note = "";
+        if (uploadFunction) {
+          await uploadFunction(outputPath, params.title ? `${params.title}.png` : undefined);
+        } else {
+          note = "\n(No upload available in this context — use MEDIA: token or attach to send it.)";
+        }
+        const dropped = params.series.length > MAX_SERIES ? `\nNote: only the first ${MAX_SERIES} series were plotted.` : "";
+        return {
+          content: [{ type: "text", text: `Chart rendered${uploadFunction ? " and uploaded" : ""}.\nPath: ${outputPath}${dropped}${note}` }],
+          details: undefined,
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text", text: `Error rendering chart: ${err.message || String(err)}` }],
+          details: undefined,
+        };
+      }
+    },
+  };
+}
+
+// ============================================================================
 // Generate Image Tool (Text-to-Image via Gemini)
 // ============================================================================
 
@@ -1637,6 +1707,7 @@ export function createTools(
     webFetchTool,
     getCurrentTimeTool,
     createRenderUiTool(ctx),
+    createRenderChartTool(ctx),
     // These tools need session context
     createAttachTool(ctx),
     createGenerateImageTool(ctx),
