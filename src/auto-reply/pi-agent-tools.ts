@@ -810,7 +810,21 @@ function createAttachTool(ctx: SessionContext): AgentTool<typeof attachSchema, u
 
 const renderUiSchema = Type.Object({
   title: Type.Optional(Type.String({ description: "Card title, rendered as a header" })),
+  context: Type.Optional(Type.Array(Type.String(), { description: "Small gray metadata line under the title (status, dates, owners; max 10 items)" })),
   paragraphs: Type.Optional(Type.Array(Type.String(), { description: "Markdown paragraphs" })),
+  cards: Type.Optional(
+    Type.Array(
+      Type.Object({
+        title: Type.String({ description: "Card title (linked when url is set)" }),
+        url: Type.Optional(Type.String({ description: "Link target; also renders an Open button" })),
+        status: Type.Optional(Type.String({ description: "Status shown in the card's context line, e.g. `🟢 In Progress`" })),
+        badges: Type.Optional(Type.Array(Type.String(), { description: "Extra context-line badges, e.g. assignee, priority" })),
+        body: Type.Optional(Type.String({ description: "Markdown body under the title" })),
+        fields: Type.Optional(Type.Array(Type.Object({ label: Type.String(), value: Type.String() }))),
+      }),
+      { description: "Rich item cards (issues, pages, incidents) rendered with title, status line, body, and an Open link" }
+    )
+  ),
   table: Type.Optional(
     Type.Object(
       {
@@ -837,6 +851,7 @@ const renderUiSchema = Type.Object({
       Type.Object({
         text: Type.String(),
         actionId: Type.String(),
+        url: Type.Optional(Type.String({ description: "If set, the button opens this URL instead of firing an action" })),
         style: Type.Optional(Type.Union([Type.Literal("primary"), Type.Literal("danger")])),
       }),
       { description: "Buttons rendered in an actions block (max 25 shown)" }
@@ -849,7 +864,7 @@ function createRenderUiTool(ctx: SessionContext): AgentTool<typeof renderUiSchem
     name: "render_ui",
     label: "Render UI",
     description:
-      "Render a structured card (table, key/value fields, unicode bar chart, and/or buttons) inline in Slack via Block Kit. Call this as your FINAL action for a turn because it replaces the current message. Do not also print the same data as plain text.",
+      "Render structured UI (item cards with status/links, table, key/value fields, unicode bar chart, context line, and/or buttons) inline in Slack via Block Kit. Use `cards` for lists of issues, pages, or incidents. Call this as your FINAL action for a turn because it replaces the current message. Do not also print the same data as plain text.",
     parameters: renderUiSchema,
     execute: async (_toolCallId, params: Static<typeof renderUiSchema>): Promise<AgentToolResult<undefined>> => {
       const blockRenderer = blockRenderers.get(ctx.sessionName);

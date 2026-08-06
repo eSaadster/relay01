@@ -91,6 +91,65 @@ describe("dslToBlocks", () => {
     expect(dslToBlocks({ paragraphs: [], fields: [], bars: [], buttons: [] })).toEqual([]);
   });
 
+  it("renders context as a single context block with mrkdwn elements", () => {
+    const blocks = dslToBlocks({ context: ["🟢 Healthy", "Updated today"] }) as any[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("context");
+    expect(blocks[0].elements).toEqual([
+      { type: "mrkdwn", text: "🟢 Healthy" },
+      { type: "mrkdwn", text: "Updated today" },
+    ]);
+  });
+
+  it("truncates context to 10 elements", () => {
+    const context = Array.from({ length: 14 }, (_, i) => `c${i}`);
+    const blocks = dslToBlocks({ context }) as any[];
+    expect(blocks[0].elements).toHaveLength(10);
+  });
+
+  it("renders a card with linked title, Open button, status line, and fields", () => {
+    const blocks = dslToBlocks({
+      cards: [
+        {
+          title: "Fix login bug",
+          url: "https://linear.app/issue/1",
+          status: "🟡 In Progress",
+          badges: ["@ali", "High"],
+          body: "Session cookie expires early.",
+          fields: [{ label: "Team", value: "Auth" }],
+        },
+      ],
+    }) as any[];
+    expect(blocks.map((b: any) => b.type)).toEqual(["section", "context", "section"]);
+    expect(blocks[0].text.text).toBe("*<https://linear.app/issue/1|Fix login bug>*\nSession cookie expires early.");
+    expect(blocks[0].accessory).toMatchObject({ type: "button", url: "https://linear.app/issue/1" });
+    expect(blocks[1].elements.map((e: any) => e.text)).toEqual(["🟡 In Progress", "@ali", "High"]);
+    expect(blocks[2].fields).toEqual([{ type: "mrkdwn", text: "*Team*\nAuth" }]);
+  });
+
+  it("renders a minimal card without url as a bold title only and separates cards with dividers", () => {
+    const blocks = dslToBlocks({ cards: [{ title: "A" }, { title: "B" }] }) as any[];
+    expect(blocks.map((b: any) => b.type)).toEqual(["section", "divider", "section"]);
+    expect(blocks[0].text.text).toBe("*A*");
+    expect(blocks[0].accessory).toBeUndefined();
+  });
+
+  it("gives card Open buttons unique action_ids across cards", () => {
+    const blocks = dslToBlocks({
+      cards: [
+        { title: "A", url: "https://x.test/a" },
+        { title: "B", url: "https://x.test/a" },
+      ],
+    }) as any[];
+    const ids = blocks.filter((b: any) => b.accessory).map((b: any) => b.accessory.action_id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("renders a link button with a url", () => {
+    const blocks = dslToBlocks({ buttons: [{ text: "Open", actionId: "open", url: "https://x.test" }] }) as any[];
+    expect(blocks[0].elements[0].url).toBe("https://x.test");
+  });
+
   it("renders a full spec in title/paragraph/table/fields/bars/buttons order", () => {
     const spec: UiSpec = {
       title: "T",
