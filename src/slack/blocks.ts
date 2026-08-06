@@ -40,6 +40,9 @@ const MAX_CONTEXT_ELEMENTS = 10;
 const MAX_BUTTONS = 25;
 const MAX_BLOCKS = 50;
 const MAX_URL = 3000;
+// Native table block limits: 100 rows (incl. header), 20 cells per row.
+const MAX_TABLE_ROWS = 100;
+const MAX_TABLE_COLS = 20;
 
 // Length of the surrounding "```\n" … "\n```" code fence.
 const FENCE_OVERHEAD = "```\n\n```".length;
@@ -102,10 +105,19 @@ export function dslToBlocks(ui: UiSpec): unknown[] {
     b.push(...cardToBlocks(card, i));
   });
   if (ui.table) {
-    const rows = [ui.table.headers, ...ui.table.rows];
-    const w = ui.table.headers.map((_, c) => Math.max(...rows.map((r) => String(r[c] ?? "").length)));
-    const fmt = (r: (string | number)[]) => r.map((c, i) => String(c ?? "").padEnd(w[i])).join("  ");
-    b.push({ type: "section", text: { type: "mrkdwn", text: fenced(rows.map(fmt).join("\n")) } });
+    // Native table block: bold header row, numeric columns right-aligned.
+    const headers = ui.table.headers.slice(0, MAX_TABLE_COLS);
+    const headerRow = headers.map((h) => ({
+      type: "rich_text",
+      elements: [{ type: "rich_text_section", elements: [{ type: "text", text: String(h), style: { bold: true } }] }],
+    }));
+    const dataRows = ui.table.rows
+      .slice(0, MAX_TABLE_ROWS - 1)
+      .map((r) => r.slice(0, MAX_TABLE_COLS).map((c) => ({ type: "raw_text", text: String(c ?? "") })));
+    const column_settings = headers.map((_, ci) => ({
+      align: ui.table!.rows.length > 0 && ui.table!.rows.every((r) => typeof r[ci] === "number") ? "right" : "left",
+    }));
+    b.push({ type: "table", rows: [headerRow, ...dataRows], column_settings });
   }
   if (ui.fields?.length) {
     b.push({

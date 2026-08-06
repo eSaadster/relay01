@@ -15,20 +15,37 @@ describe("dslToBlocks", () => {
     expect(blocks[1].text.text).toBe("two");
   });
 
-  it("aligns table columns by padding to the widest cell", () => {
+  it("renders a native table block with a bold header row", () => {
     const blocks = dslToBlocks({
       table: { headers: ["Name", "Score"], rows: [["Al", 100], ["Madeline", 7]] },
     }) as any[];
     expect(blocks).toHaveLength(1);
-    const text: string = blocks[0].text.text;
-    expect(text.startsWith("```\n")).toBe(true);
-    expect(text.endsWith("\n```")).toBe(true);
-    // Strip the fences without trimming so trailing column padding is preserved.
-    const lines = text.slice("```\n".length, text.length - "\n```".length).split("\n");
-    // "Name" column width is max("Name","Al","Madeline") = 8 → header padded to 8 chars
-    expect(lines[0]).toBe("Name      Score");
-    expect(lines[1]).toBe("Al        100  ");
-    expect(lines[2]).toBe("Madeline  7    ");
+    const table = blocks[0];
+    expect(table.type).toBe("table");
+    expect(table.rows).toHaveLength(3);
+    // Header cells are bold rich_text
+    expect(table.rows[0][0].elements[0].elements[0]).toEqual({ type: "text", text: "Name", style: { bold: true } });
+    // Data cells are raw_text strings
+    expect(table.rows[1]).toEqual([
+      { type: "raw_text", text: "Al" },
+      { type: "raw_text", text: "100" },
+    ]);
+  });
+
+  it("right-aligns all-numeric table columns", () => {
+    const blocks = dslToBlocks({
+      table: { headers: ["Name", "Score", "Mixed"], rows: [["Al", 100, 1], ["Bo", 7, "n/a"]] },
+    }) as any[];
+    expect(blocks[0].column_settings).toEqual([{ align: "left" }, { align: "right" }, { align: "left" }]);
+  });
+
+  it("clamps tables to 100 rows and 20 columns", () => {
+    const headers = Array.from({ length: 25 }, (_, i) => `H${i}`);
+    const rows = Array.from({ length: 150 }, () => headers.map((_, i) => i));
+    const blocks = dslToBlocks({ table: { headers, rows } }) as any[];
+    expect(blocks[0].rows).toHaveLength(100);
+    expect(blocks[0].rows[0]).toHaveLength(20);
+    expect(blocks[0].rows[1]).toHaveLength(20);
   });
 
   it("scales bars so the largest value fills 20 blocks", () => {
@@ -163,7 +180,7 @@ describe("dslToBlocks", () => {
     expect(blocks.map((b) => b.type)).toEqual([
       "header",
       "section",
-      "section",
+      "table",
       "section",
       "section",
       "actions",
