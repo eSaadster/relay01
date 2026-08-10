@@ -476,11 +476,38 @@ const bot = new MomBot(
 			throw new Error("chat agent returned empty text for run completion");
 		}
 	};
+	// Mid-run questions: route ask_user questions through the chat agent so it
+	// can ask conversationally; the user's reply is forwarded via agent_answer.
+	const agentRunQuestion = async (
+		session: string,
+		run: import("../auto-reply/agents/types.js").AgentRun,
+		question: import("../auto-reply/agents/types.js").PendingQuestion,
+	) => {
+		const optionsText = question.options?.length
+			? `\nOptions: ${question.options.join(" | ")}`
+			: "";
+		const internalNote =
+			`[Automated notification — not a user message]\n` +
+			`Background agent run ${run.id} is PAUSED waiting for user input. It asks:\n` +
+			`"${question.title}"${optionsText}\n\n` +
+			`Relay this question to the user now, mentioning it's from run ${run.id}. ` +
+			`When the user replies with their answer, call the agent_answer tool with ` +
+			`runId "${run.id}" and their answer so the run can continue. Do not invent ` +
+			`an answer yourself.`;
+
+		const result = await manager.prompt(session, internalNote, {});
+		if (result.text?.trim()) {
+			await agentSendNotification(session, result.text);
+		} else {
+			throw new Error("chat agent returned empty text for run question");
+		}
+	};
 	getAgentManager({
 		definitionsPath: agentsCfg?.definitionsPath ?? "~/relay01/agents/definitions",
 		maxConcurrent: agentsCfg?.maxConcurrent ?? 3,
 		sendNotification: agentSendNotification,
 		onRunComplete: agentRunComplete,
+		onRunQuestion: agentRunQuestion,
 	});
 	// Resume any runs that were active before restart
 	await getAgentManager().resumeActiveRuns();

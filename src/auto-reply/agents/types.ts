@@ -74,10 +74,31 @@ export interface ChainDefinition {
  */
 export type AgentRunStatus =
   | "running"
+  | "waiting_input"
   | "completed"
   | "failed"
   | "timeout"
   | "stopped";
+
+/**
+ * A pending ask_user question from a running agent (extension_ui_request).
+ */
+export interface PendingQuestion {
+  /** extension_ui_request id — needed to route the answer back */
+  id: string;
+
+  /** Dialog method: "input" | "select" | "confirm" | "editor" */
+  method: string;
+
+  /** Question text */
+  title: string;
+
+  /** Choices (select only) */
+  options?: string[];
+
+  /** ISO timestamp when asked */
+  askedAt: string;
+}
 
 /**
  * Runtime state of an agent run (status.json).
@@ -116,6 +137,9 @@ export interface AgentRun {
   /** Error message if failed */
   error?: string;
 
+  /** Question the run is currently blocked on (status "waiting_input") */
+  pendingQuestion?: PendingQuestion;
+
   /** Chain step tracking */
   steps?: {
     /** Total number of steps */
@@ -151,6 +175,9 @@ export interface AgentRunEvent {
     | "failed"
     | "timeout"
     | "stopped"
+    | "question_asked"
+    | "question_answered"
+    | "steered"
 ;
 
   /** Chain step index (if applicable) */
@@ -183,6 +210,18 @@ export interface AgentRunManagerConfig {
     session: string,
     run: AgentRun,
     outputTail: string,
+  ) => Promise<void>;
+
+  /**
+   * Optional handler for a run asking the user a question (ask_user tool).
+   * Should surface the question in chat; the answer is routed back via
+   * AgentRunManager.answerRun(). Falls back to sendNotification if unset
+   * or throwing.
+   */
+  onRunQuestion?: (
+    session: string,
+    run: AgentRun,
+    question: PendingQuestion,
   ) => Promise<void>;
 }
 

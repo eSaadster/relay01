@@ -23,7 +23,9 @@ export type AgentCommand =
   | { type: "list" }
   | { type: "status"; runId?: string }
   | { type: "run"; definitionId?: string; prompt: string }
-  | { type: "stop"; runId: string };
+  | { type: "stop"; runId: string }
+  | { type: "answer"; runId: string; text: string }
+  | { type: "steer"; runId: string; text: string };
 
 /**
  * Check if a message is an agent command.
@@ -54,6 +56,16 @@ export function parseAgentCommand(text: string): AgentCommand | null {
     const rest = trimmed.slice("agent stop".length).trim();
     if (!rest) return null; // require a run ID
     return { type: "stop", runId: rest };
+  }
+
+  // "agent answer <run-id> <text>" / "agent steer <run-id> <text>"
+  const interactMatch = trimmed.match(/^agent\s+(answer|steer)\s+(\S+)\s+(.+)$/is);
+  if (interactMatch) {
+    return {
+      type: interactMatch[1].toLowerCase() as "answer" | "steer",
+      runId: interactMatch[2],
+      text: interactMatch[3].trim(),
+    };
   }
 
   // "agent status <run-id>"
@@ -201,6 +213,27 @@ export async function handleAgentCommand(
         return stopped
           ? `🛑 Stopped agent: ${runToStop.id}`
           : `Failed to stop agent: ${runToStop.id}`;
+      }
+
+      case "answer":
+      case "steer": {
+        const manager = getAgentManager({
+          definitionsPath,
+          maxConcurrent: agentsConfig.maxConcurrent ?? 3,
+          sendNotification: async (_, msg) => sendNotification(msg),
+        });
+        const ok =
+          cmd.type === "answer"
+            ? await manager.answerRun(cmd.runId, cmd.text)
+            : await manager.steerRun(cmd.runId, cmd.text);
+        if (ok) {
+          return cmd.type === "answer"
+            ? `✉️ Answer delivered to ${cmd.runId}`
+            : `➡️ Steering message queued for ${cmd.runId}`;
+        }
+        return cmd.type === "answer"
+          ? `No pending question found for run ${cmd.runId} (run not active or not waiting for input).`
+          : `Run ${cmd.runId} is not active — cannot steer.`;
       }
 
       case "run": {

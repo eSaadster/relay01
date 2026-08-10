@@ -21,10 +21,13 @@ import {
   unregisterAgentSessionIfEmpty,
 } from "./memory.js";
 import {
+  answerRun as runnerAnswerRun,
   executeChainRun,
   executeRun,
+  getLiveChild,
   isProcessAlive,
   parseDuration,
+  steerRun as runnerSteerRun,
   stopProcess,
 } from "./runner.js";
 import type {
@@ -32,6 +35,7 @@ import type {
   AgentRun,
   AgentRunManagerConfig,
   ChainStep,
+  PendingQuestion,
 } from "./types.js";
 
 /**
@@ -114,7 +118,7 @@ export class AgentRunManager {
           }
 
           const finalRun = found.run;
-          if (finalRun.status === "running") {
+          if (finalRun.status === "running" || finalRun.status === "waiting_input") {
             finalRun.status = "failed";
             finalRun.error = "Process exited while manager was detached";
           }
@@ -220,6 +224,8 @@ export class AgentRunManager {
       await this.handleRunComplete(updatedRun, session);
     };
 
+    const onQuestion = this.makeQuestionHandler(session);
+
     const handleError = async (err: unknown) => {
       logVerbose(`[agents/manager] Run ${runId} error: ${err}`);
       this.stopOrphanMonitor(runId);
@@ -245,6 +251,7 @@ export class AgentRunManager {
       mcpConfigPath: definition.mcpConfigPath,
       timeoutMs,
       onStatusChange,
+      onQuestion,
     }).catch(handleError);
 
     return run;
@@ -304,6 +311,7 @@ export class AgentRunManager {
       task: userPrompt,
       model: definition.config.model,
       timeoutMs,
+      onQuestion: this.makeQuestionHandler(session),
       onStatusChange: async (updatedRun) => {
         this.stopOrphanMonitor(runId);
         this.activeRuns.delete(runId);
@@ -326,6 +334,68 @@ export class AgentRunManager {
     });
 
     return run;
+  }
+
+  /**
+   * Build the per-run question handler: surfaces ask_user questions in chat
+   * via onRunQuestion, falling back to a plain notification.
+   */
+  private makeQuestionHandler(
+    session: string,
+  ): (run: AgentRun, question: PendingQuestion) => Promise<void> {
+    return async (run, question) => {
+      const fallback = async () => {
+        const optionsText = question.options?.length
+          ? `\nOptions: ${question.options.join(" | ")}`
+          : "";
+        await this.config.sendNotification(
+          session,
+          `❓ Agent ${run.id} asks:\n${question.title}${optionsText}\nReply with: agent answer ${run.id} <your answer>`,
+        );
+      };
+
+      if (this.config.onRunQuestion) {
+        try {
+          await this.config.onRunQuestion(session, run, question);
+          return;
+        } catch (err) {
+          logVerbose(
+            `[agents/manager] onRunQuestion failed for ${run.id}, falling back: ${err}`,
+          );
+        }
+      }
+      await fallback();
+    };
+  }
+
+  /**
+   * Answer a run's pending ask_user question.
+   */
+  async answerRun(runId: string, text: string): Promise<boolean> {
+    const active = this.findActiveRun(runId);
+    if (!active) return false;
+    return runnerAnswerRun(active.run, active.session, text);
+  }
+
+  /**
+   * Queue a steering message into a running agent.
+   */
+  async steerRun(runId: string, message: string): Promise<boolean> {
+    const active = this.findActiveRun(runId);
+    if (!active) return false;
+    return runnerSteerRun(active.run, active.session, message);
+  }
+
+  /** Find an in-memory active run by exact id or prefix. */
+  private findActiveRun(
+    runId: string,
+  ): { run: AgentRun; session: string } | undefined {
+    const exact = this.activeRuns.get(runId);
+    if (exact) return exact;
+    for (const [id, entry] of this.activeRuns) {
+      if (id.startsWith(runId)) return entry;
+    }
+    return undefined;
   }
 
   /**
@@ -388,7 +458,12 @@ export class AgentRunManager {
       run.status = "stopped";
       await saveRunStatus(session, run);
 
-      if (run.pid && isProcessAlive(run.pid)) {
+      // Graceful RPC abort first; kill the process after a grace period.
+      const child = getLiveChild(run.id);
+      if (child) {
+        child.abort();
+        setTimeout(() => child.kill(), 5000).unref();
+      } else if (run.pid && isProcessAlive(run.pid)) {
         stopProcess(run.pid);
       }
 
@@ -472,8 +547,11 @@ export class AgentRunManager {
           // Process died during restart
           run.status = "failed";
           run.ended = new Date().toISOString();
-          run.error = "Process died during restart";
+          run.error = run.pendingQuestion
+            ? `Process died during restart with an unanswered question: "${run.pendingQuestion.title}"`
+            : "Process died during restart";
           run.pid = undefined;
+          run.pendingQuestion = undefined;
           await saveRunStatus(session, run);
           await archiveRun(session, run.id);
           await unregisterAgentSessionIfEmpty(session);

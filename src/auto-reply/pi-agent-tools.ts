@@ -1588,6 +1588,141 @@ function createAgentStatusTool(ctx: SessionContext): AgentTool<typeof agentStatu
   };
 }
 
+const agentAnswerSchema = Type.Object({
+  runId: Type.String({ description: "Run id that asked the question" }),
+  answer: Type.String({
+    description: "The user's answer to forward to the waiting run",
+  }),
+});
+
+function createAgentAnswerTool(): AgentTool<typeof agentAnswerSchema, undefined> {
+  return {
+    name: "agent_answer",
+    label: "Answer Background Agent",
+    description:
+      "Forward the user's answer to a background agent run that is waiting on an " +
+      "ask_user question (status waiting_input). When a run has asked a question and " +
+      "the user replies, call this with the run id and their answer so the run can continue.",
+    parameters: agentAnswerSchema,
+    execute: async (_toolCallId, params): Promise<AgentToolResult<undefined>> => {
+      try {
+        const { getAgentManager } = await import("./agents/manager.js");
+        const ok = await getAgentManager().answerRun(params.runId, params.answer);
+        return {
+          content: [
+            {
+              type: "text",
+              text: ok
+                ? `Answer delivered to run ${params.runId}; it will continue now.`
+                : `Run ${params.runId} has no pending question (not active or not waiting for input).`,
+            },
+          ],
+          details: undefined,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to answer run: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          details: undefined,
+        };
+      }
+    },
+  };
+}
+
+const agentSteerSchema = Type.Object({
+  runId: Type.String({ description: "Run id to steer" }),
+  message: Type.String({
+    description: "Instruction to inject into the running agent",
+  }),
+});
+
+function createAgentSteerTool(): AgentTool<typeof agentSteerSchema, undefined> {
+  return {
+    name: "agent_steer",
+    label: "Steer Background Agent",
+    description:
+      "Queue a steering instruction into a running background agent (course-correct, " +
+      "add context, change direction) without stopping it. Delivered after the run's " +
+      "current turn. Use agent_status first to confirm the run is still active.",
+    parameters: agentSteerSchema,
+    execute: async (_toolCallId, params): Promise<AgentToolResult<undefined>> => {
+      try {
+        const { getAgentManager } = await import("./agents/manager.js");
+        const ok = await getAgentManager().steerRun(params.runId, params.message);
+        return {
+          content: [
+            {
+              type: "text",
+              text: ok
+                ? `Steering message queued for run ${params.runId}.`
+                : `Run ${params.runId} is not active — cannot steer.`,
+            },
+          ],
+          details: undefined,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to steer run: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          details: undefined,
+        };
+      }
+    },
+  };
+}
+
+const agentStopSchema = Type.Object({
+  runId: Type.String({ description: "Run id to stop" }),
+});
+
+function createAgentStopTool(): AgentTool<typeof agentStopSchema, undefined> {
+  return {
+    name: "agent_stop",
+    label: "Stop Background Agent",
+    description:
+      "Stop a running background agent run. Aborts gracefully via RPC first, then " +
+      "kills the process after a grace period. Use when the user asks to cancel or " +
+      "stop a run. Use agent_status first if unsure of the run id.",
+    parameters: agentStopSchema,
+    execute: async (_toolCallId, params): Promise<AgentToolResult<undefined>> => {
+      try {
+        const { getAgentManager } = await import("./agents/manager.js");
+        const ok = await getAgentManager().stopRun(params.runId);
+        return {
+          content: [
+            {
+              type: "text",
+              text: ok
+                ? `Stop requested for run ${params.runId}; its final status will be announced in chat.`
+                : `Run ${params.runId} not found — it may have already completed.`,
+            },
+          ],
+          details: undefined,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to stop run: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          details: undefined,
+        };
+      }
+    },
+  };
+}
+
 // ============================================================================
 // Export tools factory
 // ============================================================================
@@ -1867,6 +2002,9 @@ export function createTools(
     // Background agent delegation (pi --rlm runs)
     createAgentRunTool(ctx),
     createAgentStatusTool(ctx),
+    createAgentAnswerTool(),
+    createAgentSteerTool(),
+    createAgentStopTool(),
   ];
   if (options?.notify) {
     tools.push(createSendMessageTool(ctx, options.notify));
