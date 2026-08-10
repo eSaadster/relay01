@@ -247,7 +247,7 @@ export class AgentRunManager {
       run,
       session,
       prompt: fullPrompt,
-      model: definition.config.model,
+      model: definition.config.model ?? this.config.defaultModel,
       mcpConfigPath: definition.mcpConfigPath,
       timeoutMs,
       onStatusChange,
@@ -309,7 +309,7 @@ export class AgentRunManager {
       session,
       steps,
       task: userPrompt,
-      model: definition.config.model,
+      model: definition.config.model ?? this.config.defaultModel,
       timeoutMs,
       onQuestion: this.makeQuestionHandler(session),
       onStatusChange: async (updatedRun) => {

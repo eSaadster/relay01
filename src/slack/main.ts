@@ -505,6 +505,7 @@ const bot = new MomBot(
 	getAgentManager({
 		definitionsPath: agentsCfg?.definitionsPath ?? "~/relay01/agents/definitions",
 		maxConcurrent: agentsCfg?.maxConcurrent ?? 3,
+		defaultModel: agentsCfg?.model,
 		sendNotification: agentSendNotification,
 		onRunComplete: agentRunComplete,
 		onRunQuestion: agentRunQuestion,

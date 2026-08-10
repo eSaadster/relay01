@@ -175,6 +175,7 @@ export async function handleAgentCommand(
         const manager = getAgentManager({
           definitionsPath,
           maxConcurrent: agentsConfig.maxConcurrent ?? 3,
+          defaultModel: agentsConfig.model,
           sendNotification: async (_, msg) => sendNotification(msg),
         });
         const definitions = await manager.listDefinitions();
@@ -206,6 +207,7 @@ export async function handleAgentCommand(
         const manager = getAgentManager({
           definitionsPath,
           maxConcurrent: agentsConfig.maxConcurrent ?? 3,
+          defaultModel: agentsConfig.model,
           sendNotification: async (_, msg) => sendNotification(msg),
         });
 
@@ -220,6 +222,7 @@ export async function handleAgentCommand(
         const manager = getAgentManager({
           definitionsPath,
           maxConcurrent: agentsConfig.maxConcurrent ?? 3,
+          defaultModel: agentsConfig.model,
           sendNotification: async (_, msg) => sendNotification(msg),
         });
         const ok =
@@ -244,6 +247,7 @@ export async function handleAgentCommand(
         const manager = getAgentManager({
           definitionsPath,
           maxConcurrent: agentsConfig.maxConcurrent ?? 3,
+          defaultModel: agentsConfig.model,
           sendNotification: async (_, msg) => sendNotification(msg),
         });
 

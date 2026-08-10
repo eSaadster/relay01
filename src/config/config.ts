@@ -58,6 +58,7 @@ export type McpConfig = {
 export type AgentsConfig = {
   definitionsPath?: string; // default: ~/relay01/agents/definitions
   maxConcurrent?: number;   // default: 3
+  model?: string;           // default model for runs whose definition sets none
 };
 
 export type Relay01Config = {
@@ -189,6 +190,7 @@ const AgentsSchema = z
   .object({
     definitionsPath: z.string().optional(),
     maxConcurrent: z.number().int().positive().optional(),
+    model: z.string().optional(),
   })
   .optional();
 

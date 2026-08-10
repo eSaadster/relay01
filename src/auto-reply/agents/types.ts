@@ -197,6 +197,9 @@ export interface AgentRunManagerConfig {
   /** Maximum concurrent agent runs */
   maxConcurrent: number;
 
+  /** Default model for runs whose definition sets none */
+  defaultModel?: string;
+
   /** Function to send notifications via Slack */
   sendNotification: (session: string, message: string) => Promise<void>;
 
@@ -234,6 +237,9 @@ export interface AgentsConfig {
 
   /** Max concurrent agent runs (default: 3) */
   maxConcurrent?: number;
+
+  /** Default model for runs whose definition sets none */
+  model?: string;
 
 }
 
