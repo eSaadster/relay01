@@ -370,7 +370,8 @@ export function createAdHocDefinition(userPrompt: string): AgentDefinition {
     path: "(generated)",
     config: {
       timeout: "30m",
-      model: "glm-4.7",
+      // No model here: ad-hoc runs use agents.model from relay01.json
+      // (AgentRunManagerConfig.defaultModel), falling back to pi's default.
     },
     instructions: `# Ad-hoc Agent Task
 
