@@ -198,7 +198,26 @@ export async function findModel(modelId: string): Promise<{ provider: string; mo
 }
 
 const OAUTH_PATH = path.join(os.homedir(), ".pi", "agent", "auth.json");
+const CODEX_CLI_AUTH_PATH = path.join(os.homedir(), ".codex", "auth.json");
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000; // Refresh 5 min before expiry
+
+/**
+ * The Codex CLI (`codex login`) authenticates against the same OAuth client as
+ * our openai-codex provider, so its tokens are a valid recovery source when our
+ * own refresh token has died. Returns null if the file is missing or unusable.
+ */
+async function loadCodexCliTokens(): Promise<{ access: string; refresh: string } | null> {
+  try {
+    const content = await fs.readFile(CODEX_CLI_AUTH_PATH, "utf8");
+    const parsed = JSON.parse(content) as {
+      tokens?: { access_token?: string; refresh_token?: string };
+    };
+    if (!parsed.tokens?.access_token || !parsed.tokens?.refresh_token) return null;
+    return { access: parsed.tokens.access_token, refresh: parsed.tokens.refresh_token };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Load system prompt from file with session-level hierarchy:
@@ -342,8 +361,33 @@ async function loadOAuth(refreshProvider?: string): Promise<OAuthConfig> {
           oauth[provider] = await refreshOAuthProviderToken(provider, credentials);
           changed = true;
         } catch (refreshErr) {
-          logVerbose(`Token refresh failed for ${provider}: ${refreshErr}`);
-          // Continue with existing token, might still work
+          console.error(`[auth] Token refresh failed for ${provider}: ${refreshErr}`);
+
+          // Recovery for openai-codex: fall back to the Codex CLI's tokens
+          // (`codex login` writes ~/.codex/auth.json against the same OAuth
+          // client), so a plain re-login fixes a dead refresh token here.
+          if (provider === "openai-codex") {
+            const cliTokens = await loadCodexCliTokens();
+            if (cliTokens && cliTokens.refresh !== credentials.refresh) {
+              console.error(
+                `[auth] Falling back to Codex CLI tokens from ${CODEX_CLI_AUTH_PATH}`
+              );
+              oauth[provider] = {
+                ...credentials,
+                access: cliTokens.access,
+                refresh: cliTokens.refresh,
+                // Unknown real expiry; assume short-lived so the next load
+                // refreshes via the (fresh) refresh token.
+                expires: now + 30 * 60 * 1000,
+              };
+              changed = true;
+            } else {
+              console.error(
+                `[auth] No usable Codex CLI tokens to fall back to — run \`codex login\` to recover`
+              );
+            }
+          }
+          // Otherwise continue with existing token, might still work
         }
       }
     }
