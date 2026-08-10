@@ -447,15 +447,40 @@ const bot = new MomBot(
 
 	// Initialize agent manager with Slack notification callback
 	const agentsCfg = loadConfig().agents;
+	const agentSendNotification = async (session: string, message: string) => {
+		const channelId = await getSessionChannelId(session);
+		if (channelId) {
+			await bot.getWebClient().chat.postMessage({ channel: channelId, text: message });
+		}
+	};
+	// Rich completion: route the run's output through the chat agent so it
+	// can deliver the result conversationally (and remember it in context).
+	const agentRunComplete = async (
+		session: string,
+		run: import("../auto-reply/agents/types.js").AgentRun,
+		outputTail: string,
+	) => {
+		const internalNote =
+			`[Automated notification — not a user message]\n` +
+			`Background agent run ${run.id} finished with status: ${run.status}.` +
+			`${run.error ? `\nError: ${run.error}` : ""}\n\n` +
+			`Output tail:\n${outputTail || "(no output)"}\n\n` +
+			`Relay the outcome to the user in your usual voice. Report the run id ` +
+			`${run.id} and the real result. If the run failed, say so honestly.`;
+
+		const result = await manager.prompt(session, internalNote, {});
+		if (result.text?.trim()) {
+			await agentSendNotification(session, result.text);
+		} else {
+			// Agent produced nothing (e.g. queued) — fall back to a plain status line
+			throw new Error("chat agent returned empty text for run completion");
+		}
+	};
 	getAgentManager({
 		definitionsPath: agentsCfg?.definitionsPath ?? "~/relay01/agents/definitions",
 		maxConcurrent: agentsCfg?.maxConcurrent ?? 3,
-		sendNotification: async (session: string, message: string) => {
-			const channelId = await getSessionChannelId(session);
-			if (channelId) {
-				await bot.getWebClient().chat.postMessage({ channel: channelId, text: message });
-			}
-		},
+		sendNotification: agentSendNotification,
+		onRunComplete: agentRunComplete,
 	});
 	// Resume any runs that were active before restart
 	await getAgentManager().resumeActiveRuns();

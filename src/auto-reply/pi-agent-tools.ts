@@ -1437,111 +1437,150 @@ function createMcpTool(ctx: SessionContext): AgentTool<typeof mcpSchema, undefin
 }
 
 // ============================================================================
-// Spawn Agent tool
+// Agent Run tools (delegate heavy work to a background pi --rlm run)
 // ============================================================================
 
-const spawnAgentSchema = Type.Object({
-  action: Type.Union([
-    Type.Literal("run"),
-    Type.Literal("list"),
-    Type.Literal("status"),
-    Type.Literal("stop"),
-  ], { description: "Action to perform" }),
-  prompt: Type.Optional(Type.String({ description: "Task description (required for action=run)" })),
-  definitionId: Type.Optional(Type.String({ description: "Definition ID to use (optional for action=run)" })),
-  runId: Type.Optional(Type.String({ description: "Run ID (required for action=stop, optional for action=status)" })),
+const agentRunSchema = Type.Object({
+  task: Type.String({
+    description: "The task for the background agent to perform",
+  }),
+  definitionId: Type.Optional(
+    Type.String({
+      description:
+        "Agent definition id to use (see 'agent list'); omit for an ad-hoc run",
+    }),
+  ),
 });
 
-function createSpawnAgentTool(ctx: SessionContext): AgentTool<typeof spawnAgentSchema, undefined> {
+function createAgentRunTool(ctx: SessionContext): AgentTool<typeof agentRunSchema, undefined> {
   return {
-    name: "spawn_agent",
-    label: "Spawn Agent",
-    description: "Spawn a background sub-agent to handle long-running tasks autonomously. Use action=run to start, action=list to see definitions, action=status to check active runs, action=stop to kill a run.",
-    parameters: spawnAgentSchema,
+    name: "agent_run",
+    label: "Run Background Agent",
+    description:
+      "The ONLY way to start a background task. Delegates a heavy or long-running " +
+      "task to a background agent (pi in rlm mode) in a separate process and returns " +
+      "a run id immediately; the result is announced in chat when the run completes. " +
+      "Use for multi-step research, large file processing, or anything too slow for " +
+      "the chat turn. Never claim a background task was started unless this tool " +
+      "returned a run id — report that exact id to the user.",
+    parameters: agentRunSchema,
     execute: async (_toolCallId, params): Promise<AgentToolResult<undefined>> => {
       try {
         // Lazy import to avoid circular deps at module load time
         const { getAgentManager } = await import("./agents/manager.js");
-        const { listAllActiveRuns, discoverDefinitions } = await import("./agents/index.js");
-
         const manager = getAgentManager();
-
-        switch (params.action) {
-          case "run": {
-            if (!params.prompt) {
-              return { content: [{ type: "text", text: "Error: prompt is required for action=run" }], details: undefined };
-            }
-            const run = await manager.startRun({
-              definitionId: params.definitionId,
-              userPrompt: params.prompt,
-              session: ctx.sessionName,
-            });
-            return {
-              content: [{ type: "text", text: `Agent started: ${run.id}\nDefinition: ${run.definitionId}\nWorking in: ${run.cwd}\nYou'll be notified when it completes.` }],
-              details: undefined,
-            };
-          }
-
-          case "list": {
-            const definitions = await manager.listDefinitions();
-            if (definitions.length === 0) {
-              return { content: [{ type: "text", text: "No agent definitions found." }], details: undefined };
-            }
-            const lines = definitions.map(
-              (d) => `• ${d.id} (timeout: ${d.config.timeout || "30m"}${d.isChain ? ", chain" : ""})`
-            );
-            return {
-              content: [{ type: "text", text: `Agent definitions:\n${lines.join("\n")}` }],
-              details: undefined,
-            };
-          }
-
-          case "status": {
-            if (params.runId) {
-              const run = await manager.getRunStatus(params.runId);
-              if (!run) {
-                return { content: [{ type: "text", text: `Run not found: ${params.runId}` }], details: undefined };
-              }
-              const age = Math.round((Date.now() - new Date(run.started).getTime()) / 1000 / 60);
-              const stepInfo = run.steps ? ` [step ${run.steps.current + 1}/${run.steps.total}]` : "";
-              return {
-                content: [{ type: "text", text: `${run.id} — ${run.status}${stepInfo} (${age}m ago)\nPrompt: "${run.userPrompt}"${run.error ? `\nError: ${run.error}` : ""}` }],
-                details: undefined,
-              };
-            }
-            const runs = await listAllActiveRuns();
-            if (runs.length === 0) {
-              return { content: [{ type: "text", text: "No active agents." }], details: undefined };
-            }
-            const lines = runs.map((r) => {
-              const age = Math.round((Date.now() - new Date(r.started).getTime()) / 1000 / 60);
-              const stepInfo = r.steps ? ` [step ${r.steps.current + 1}/${r.steps.total}]` : "";
-              return `• ${r.id} (${r.status}${stepInfo}, ${age}m) — "${r.userPrompt.slice(0, 60)}${r.userPrompt.length > 60 ? "..." : ""}"`;
-            });
-            return {
-              content: [{ type: "text", text: `Active agents (${runs.length}):\n${lines.join("\n")}` }],
-              details: undefined,
-            };
-          }
-
-          case "stop": {
-            if (!params.runId) {
-              return { content: [{ type: "text", text: "Error: runId is required for action=stop" }], details: undefined };
-            }
-            const stopped = await manager.stopRun(params.runId);
-            return {
-              content: [{ type: "text", text: stopped ? `Stopped agent: ${params.runId}` : `Agent not found: ${params.runId}` }],
-              details: undefined,
-            };
-          }
-
-          default:
-            return { content: [{ type: "text", text: "Unknown action." }], details: undefined };
-        }
-      } catch (err: any) {
-        console.error("[spawn_agent] Error:", err);
+        const run = await manager.startRun({
+          definitionId: params.definitionId,
+          userPrompt: params.task,
+          session: ctx.sessionName,
+          // Ad-hoc runs work in the session scratchpad, not the relay's cwd
+          cwd: ctx.sessionCwd,
+        });
         return {
-          content: [{ type: "text", text: `spawn_agent error: ${err.message || String(err)}` }],
+          content: [
+            {
+              type: "text",
+              text:
+                `Agent run started: ${run.id}\n` +
+                `Definition: ${run.definitionId}\n` +
+                `Cwd: ${run.cwd}\n` +
+                `The run executes in the background; completion is announced in this session.`,
+            },
+          ],
+          details: undefined,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to start agent run: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          details: undefined,
+        };
+      }
+    },
+  };
+}
+
+const agentStatusSchema = Type.Object({
+  runId: Type.Optional(
+    Type.String({
+      description:
+        "Run id to inspect (returns status plus recent output). Omit to list all active runs for this session.",
+    }),
+  ),
+});
+
+function createAgentStatusTool(ctx: SessionContext): AgentTool<typeof agentStatusSchema, undefined> {
+  return {
+    name: "agent_status",
+    label: "Background Agent Status",
+    description:
+      "Check background agent runs. Without a runId, lists this session's active runs. " +
+      "With a runId, returns that run's real status and the tail of its output. " +
+      "Always use this instead of guessing what a background run is doing.",
+    parameters: agentStatusSchema,
+    execute: async (_toolCallId, params): Promise<AgentToolResult<undefined>> => {
+      try {
+        const { findRunById, listActiveRuns, readOutput } = await import("./agents/memory.js");
+
+        if (params.runId) {
+          const found = await findRunById(params.runId);
+          if (!found) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `No active run found with id ${params.runId}. It may have completed (results are announced in chat) or the id may be wrong.`,
+                },
+              ],
+              details: undefined,
+            };
+          }
+          const output = await readOutput(found.session, found.run.id);
+          const tail = output.length > 3000 ? `…${output.slice(-3000)}` : output;
+          const r = found.run;
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `Run ${r.id}\nStatus: ${r.status}\nStarted: ${r.started}` +
+                  `${r.ended ? `\nEnded: ${r.ended}` : ""}` +
+                  `${r.error ? `\nError: ${r.error}` : ""}` +
+                  `\nTask: ${r.userPrompt}\n\nOutput tail:\n${tail || "(no output yet)"}`,
+              },
+            ],
+            details: undefined,
+          };
+        }
+
+        const runs = await listActiveRuns(ctx.sessionName);
+        if (runs.length === 0) {
+          return {
+            content: [
+              { type: "text", text: "No active background agent runs for this session." },
+            ],
+            details: undefined,
+          };
+        }
+        const lines = runs.map(
+          (r) => `- ${r.id} [${r.status}] started ${r.started}: ${r.userPrompt.slice(0, 100)}`,
+        );
+        return {
+          content: [{ type: "text", text: `Active runs:\n${lines.join("\n")}` }],
+          details: undefined,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to check agent status: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
           details: undefined,
         };
       }
@@ -1825,7 +1864,9 @@ export function createTools(
     createGenerateImageTool(ctx),
     createEditImageTool(ctx),
     createMcpTool(ctx),
-    createSpawnAgentTool(ctx),
+    // Background agent delegation (pi --rlm runs)
+    createAgentRunTool(ctx),
+    createAgentStatusTool(ctx),
   ];
   if (options?.notify) {
     tools.push(createSendMessageTool(ctx, options.notify));

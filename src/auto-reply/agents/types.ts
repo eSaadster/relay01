@@ -173,6 +173,17 @@ export interface AgentRunManagerConfig {
   /** Function to send notifications via Slack */
   sendNotification: (session: string, message: string) => Promise<void>;
 
+  /**
+   * Optional rich completion handler. When set, run completion is delivered
+   * here (with the tail of the run's output) instead of via sendNotification,
+   * so the result can be routed through the chat agent. The manager falls
+   * back to sendNotification if the callback throws.
+   */
+  onRunComplete?: (
+    session: string,
+    run: AgentRun,
+    outputTail: string,
+  ) => Promise<void>;
 }
 
 /**

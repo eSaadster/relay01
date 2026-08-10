@@ -59,6 +59,14 @@ function isStopped(run: AgentRun): boolean {
   return run.status === "stopped";
 }
 
+// pi-rlm subagent settings for spawned pi processes.
+// Requires @shift-labs/pi-rlm installed in the global pi config
+// (`pi install npm:@shift-labs/pi-rlm`) and Bun on PATH.
+const RLM_ENV = {
+  PI_RLM_MAX_DEPTH: "2",
+  PI_RLM_SUBAGENT_MODEL: "opencode-go/deepseek-v4-flash",
+};
+
 /**
  * Try to extract result text from stream-json output lines.
  * Parses lines matching {"type":"result",...} or {"type":"text",...}.
@@ -102,7 +110,7 @@ export async function executeRun(options: RunOptions): Promise<AgentRun> {
     await writeMcpConfig(run.cwd, mcpConfigPath);
   }
 
-  const args = ["--output-format", "stream-json"];
+  const args = ["--rlm", "--print"];
   if (model) {
     args.push("--model", model);
   }
@@ -118,7 +126,7 @@ export async function executeRun(options: RunOptions): Promise<AgentRun> {
   const child: ChildProcess = spawn("pi", args, {
     cwd: run.cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env },
+    env: { ...process.env, ...RLM_ENV },
   });
 
   run.pid = child.pid;
@@ -190,8 +198,12 @@ export async function executeRun(options: RunOptions): Promise<AgentRun> {
 
         await saveRunStatus(session, run);
 
-        // Extract result text from stream-json output for completed events
-        const resultText = finalStatus === "completed" ? extractResultText(stdout) : undefined;
+        // In --print mode stdout is plain text (buffered until exit); fall
+        // back to it when there is no stream-json result line to parse.
+        const resultText =
+          finalStatus === "completed"
+            ? extractResultText(stdout) || stripAnsi(stdout).trim()
+            : undefined;
 
         await appendEvent(session, run.id, {
           time: new Date().toISOString(),
@@ -353,7 +365,7 @@ export async function executeChainRun(
 
     const outputPath = getOutputPath(session, run.id);
 
-    const args = ["--output-format", "stream-json"];
+    const args = ["--rlm", "--print"];
     if (model) {
       args.push("--model", model);
     }
@@ -369,7 +381,7 @@ export async function executeChainRun(
       const child = spawn("pi", args, {
         cwd: run.cwd,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env },
+        env: { ...process.env, ...RLM_ENV },
       });
 
       run.pid = child.pid;

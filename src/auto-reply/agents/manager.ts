@@ -15,6 +15,7 @@ import {
   findRunById,
   initializeRunDirectory,
   listAllActiveRuns,
+  readOutput,
   registerAgentSession,
   saveRunStatus,
   unregisterAgentSessionIfEmpty,
@@ -210,11 +211,8 @@ export class AgentRunManager {
       ? `${definition.instructions}\n\n## Task\n${userPrompt}`
       : userPrompt;
 
-    // Notify user
-    await this.config.sendNotification(
-      session,
-      `🤖 Agent started: ${runId}\nDefinition: ${definition.id}\nCwd: ${resolvedCwd}`,
-    );
+    // No start notification here: every caller (agent_run tool, command
+    // handler, CLI, admin API) already confirms the start in its own reply.
 
     const onStatusChange = async (updatedRun: AgentRun) => {
       this.stopOrphanMonitor(runId);
@@ -296,10 +294,7 @@ export class AgentRunManager {
     registerAgentSession(session);
     this.activeRuns.set(runId, { run, session });
 
-    await this.config.sendNotification(
-      session,
-      `🔗 Agent chain started: ${runId}\nDefinition: ${definition.id}\nSteps: ${steps.length}\nCwd: ${resolvedCwd}`,
-    );
+    // No start notification (callers confirm the start in their own reply)
 
     // Execute chain asynchronously
     executeChainRun({
@@ -352,10 +347,26 @@ export class AgentRunManager {
       ? ` (${run.steps.results.filter((s) => s.status === "completed").length}/${run.steps.total} steps)`
       : "";
 
-    await this.config.sendNotification(
-      session,
-      `${statusEmoji} Agent ${run.status}: ${run.id}${stepInfo}${run.error ? `\n${run.error}` : ""}`,
-    );
+    const statusMessage = `${statusEmoji} Agent ${run.status}: ${run.id}${stepInfo}${run.error ? `\n${run.error}` : ""}`;
+
+    // Read the output tail before archiveRun moves the run directory
+    let delivered = false;
+    if (this.config.onRunComplete) {
+      const output = await readOutput(session, run.id);
+      const outputTail =
+        output.length > 6000 ? `…${output.slice(-6000)}` : output;
+      try {
+        await this.config.onRunComplete(session, run, outputTail);
+        delivered = true;
+      } catch (err) {
+        logVerbose(
+          `[agents/manager] onRunComplete failed for ${run.id}, falling back to plain notification: ${err}`,
+        );
+      }
+    }
+    if (!delivered) {
+      await this.config.sendNotification(session, statusMessage);
+    }
 
     // Archive the completed run
     await archiveRun(session, run.id);
