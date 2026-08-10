@@ -1450,6 +1450,14 @@ const agentRunSchema = Type.Object({
         "Agent definition id to use (see 'agent list'); omit for an ad-hoc run",
     }),
   ),
+  timeout: Type.Optional(
+    Type.String({
+      description:
+        'Maximum run duration, e.g. "45m", "2h", "90s". Defaults to the agent ' +
+        "definition's timeout (30m for ad-hoc runs). Set a higher value for " +
+        "tasks likely to exceed the default.",
+    }),
+  ),
 });
 
 function createAgentRunTool(ctx: SessionContext): AgentTool<typeof agentRunSchema, undefined> {
@@ -1475,6 +1483,7 @@ function createAgentRunTool(ctx: SessionContext): AgentTool<typeof agentRunSchem
           session: ctx.sessionName,
           // Ad-hoc runs work in the session scratchpad, not the relay's cwd
           cwd: ctx.sessionCwd,
+          timeout: params.timeout,
         });
         return {
           content: [

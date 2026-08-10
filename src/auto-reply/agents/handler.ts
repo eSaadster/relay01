@@ -22,7 +22,7 @@ function getAgentsConfig(): AgentsConfig & { definitionsPath: string } {
 export type AgentCommand =
   | { type: "list" }
   | { type: "status"; runId?: string }
-  | { type: "run"; definitionId?: string; prompt: string }
+  | { type: "run"; definitionId?: string; prompt: string; timeout?: string }
   | { type: "stop"; runId: string }
   | { type: "answer"; runId: string; text: string }
   | { type: "steer"; runId: string; text: string };
@@ -74,19 +74,34 @@ export function parseAgentCommand(text: string): AgentCommand | null {
     return { type: "status", runId: runId || undefined };
   }
 
+  // Optional "--timeout <dur>" / "-t <dur>" flag anywhere in an "agent run" command
+  let runText = trimmed;
+  let timeout: string | undefined;
+  if (lower.startsWith("agent run")) {
+    const timeoutMatch = runText.match(/\s(?:--timeout|-t)\s+(\d+[smhd])(?=\s|$)/i);
+    if (timeoutMatch) {
+      timeout = timeoutMatch[1].toLowerCase();
+      runText = (
+        runText.slice(0, timeoutMatch.index) +
+        runText.slice(timeoutMatch.index! + timeoutMatch[0].length)
+      ).trim();
+    }
+  }
+
   // "agent run -d <definition> <task>" or "agent run -a <definition> <task>"
-  const defMatch = trimmed.match(/^agent\s+run\s+-(?:d|a)\s+(\S+)\s+(.+)$/i);
+  const defMatch = runText.match(/^agent\s+run\s+-(?:d|a)\s+(\S+)\s+(.+)$/i);
   if (defMatch) {
     return {
       type: "run",
       definitionId: defMatch[1],
       prompt: defMatch[2].trim(),
+      timeout,
     };
   }
 
   // "agent run <definition> <task>" (definition is first word after "run")
   if (lower.startsWith("agent run ")) {
-    const rest = trimmed.slice("agent run ".length).trim();
+    const rest = runText.slice("agent run".length).trim();
     if (!rest) return null;
 
     // Check if first word looks like a definition ID (no spaces, identifier-ish)
@@ -96,11 +111,12 @@ export function parseAgentCommand(text: string): AgentCommand | null {
         type: "run",
         definitionId: parts[0],
         prompt: parts.slice(1).join(" "),
+        timeout,
       };
     }
 
     // Ad-hoc run (no definition)
-    return { type: "run", prompt: rest };
+    return { type: "run", prompt: rest, timeout };
   }
 
   return null;
@@ -255,6 +271,7 @@ export async function handleAgentCommand(
           definitionId: cmd.definitionId,
           userPrompt: cmd.prompt,
           session: sessionName,
+          timeout: cmd.timeout,
         });
 
         return `_Agent started: ${run.id}_`;

@@ -148,8 +148,14 @@ export class AgentRunManager {
     userPrompt: string;
     session: string;
     cwd?: string;
+    /** Per-run timeout override (e.g. "45m", "2h"); falls back to the definition's timeout */
+    timeout?: string;
   }): Promise<AgentRun> {
-    const { definitionId, userPrompt, session, cwd } = options;
+    const { definitionId, userPrompt, session, cwd, timeout } = options;
+
+    // Validate an explicit override up front so a bad value fails the start,
+    // not the detached execution
+    if (timeout) parseDuration(timeout);
 
     // Check concurrent limit
     if (this.activeRuns.size >= this.config.maxConcurrent) {
@@ -180,13 +186,14 @@ export class AgentRunManager {
         userPrompt,
         session,
         cwd,
+        timeout,
       });
     }
 
     const runId = generateRunId(definition.id);
     const defaultCwd = getSessionScratchpad(session);
     const resolvedCwd = expandPath(cwd || definition.config.cwd || defaultCwd);
-    const timeoutMs = parseDuration(definition.config.timeout || "30m");
+    const timeoutMs = parseDuration(timeout || definition.config.timeout || "30m");
 
     const run: AgentRun = {
       version: 1,
@@ -265,8 +272,9 @@ export class AgentRunManager {
     userPrompt: string;
     session: string;
     cwd?: string;
+    timeout?: string;
   }): Promise<AgentRun> {
-    const { definition, userPrompt, session, cwd } = options;
+    const { definition, userPrompt, session, cwd, timeout } = options;
 
     let steps: ChainStep[];
     try {
@@ -280,7 +288,7 @@ export class AgentRunManager {
     const runId = generateRunId(definition.id);
     const defaultCwd = getSessionScratchpad(session);
     const resolvedCwd = expandPath(cwd || definition.config.cwd || defaultCwd);
-    const timeoutMs = parseDuration(definition.config.timeout || "1h");
+    const timeoutMs = parseDuration(timeout || definition.config.timeout || "1h");
 
     const run: AgentRun = {
       version: 1,
