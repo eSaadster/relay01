@@ -258,6 +258,25 @@ const bashSchema = Type.Object({
 });
 
 /**
+ * Give git a credential helper inside the sandbox, via env rather than files.
+ *
+ * The sandbox mounts no home directory, so credential.helper=store from the
+ * host's ~/.gitconfig finds nothing and pushes die with "could not read
+ * Username". GIT_CONFIG_* is read before any config file and needs nothing on
+ * disk, so it survives re-clones and `git clean`. $GH_TOKEN is expanded by the
+ * helper's shell at call time, inside the sandbox, where it is inherited.
+ */
+function gitCredentialEnv(): string[] {
+  if (!process.env.GH_TOKEN) return [];
+  return [
+    "--setenv", "GIT_CONFIG_COUNT", "1",
+    "--setenv", "GIT_CONFIG_KEY_0", "credential.helper",
+    "--setenv", "GIT_CONFIG_VALUE_0",
+    '!f(){ echo username=x-access-token; echo password=$GH_TOKEN; }; f',
+  ];
+}
+
+/**
  * Build bwrap command for sandboxed execution.
  * Mounts system libs + scratchpad + network. No access to /home outside scratchpad.
  */
@@ -277,6 +296,8 @@ function buildBwrapCommand(command: string, cwd: string): string {
     "--share-net",
     // Read-write scratchpad only
     "--bind", cwd, cwd,
+    // Git credential helper (see gitCredentialEnv)
+    ...gitCredentialEnv(),
     // Temp directory
     "--tmpfs", "/tmp",
     // Proc for some tools
