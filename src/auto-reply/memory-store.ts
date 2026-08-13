@@ -159,6 +159,71 @@ export async function recordUserIdentity(userId: string, userName: string): Prom
 }
 
 // ============================================================================
+// Read path: bullet-level access for the memory_query tool
+//
+// MEMORY.md is one consolidated file, not per-fact files, so "facts" here are
+// just its markdown bullets. Consolidation guarantees one fact per bullet.
+// ============================================================================
+
+/**
+ * Split a scope's MEMORY.md into individual fact bullets. Returns [] when the
+ * scope has no memory yet. Leading "- " / "* " markers are stripped.
+ */
+export async function readMemoryFacts(scope: MemoryScope): Promise<string[]> {
+  const content = await loadMemory(scope);
+  if (!content) return [];
+  return content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- ") || line.startsWith("* "))
+    .map((line) => line.slice(2).trim())
+    .filter(Boolean);
+}
+
+/**
+ * Rank a scope's facts against a free-text query. Scoring is deliberately
+ * dumb (no LLM, no embeddings): a whole-query substring hit outranks partial
+ * term hits, and facts matching no term are dropped. An empty query returns
+ * every fact in file order, which is what `list` wants.
+ */
+export async function searchMemoryFacts(
+  scope: MemoryScope,
+  query: string,
+  limit = 20,
+): Promise<string[]> {
+  const facts = await readMemoryFacts(scope);
+  const needle = query.trim().toLowerCase();
+  if (!needle) return facts.slice(0, limit);
+
+  const terms = needle.split(/\s+/).filter((t) => t.length > 1);
+  const scored: Array<{ fact: string; score: number }> = [];
+  for (const fact of facts) {
+    const hay = fact.toLowerCase();
+    let score = hay.includes(needle) ? 10 : 0;
+    for (const term of terms) {
+      if (hay.includes(term)) score += 1;
+    }
+    if (score > 0) scored.push({ fact, score });
+  }
+  // Stable within equal scores: sort() on a file-ordered array preserves order.
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((s) => s.fact);
+}
+
+/**
+ * Number of facts waiting in a scope's inbox — used to tell the agent how
+ * far a just-written fact is from being consolidated into MEMORY.md.
+ */
+export async function pendingCount(scope: MemoryScope): Promise<number> {
+  return (await readPending(scope)).length;
+}
+
+/** Facts needed in a scope's inbox before consolidation runs. */
+export function consolidateThreshold(scope: MemoryScope): number {
+  return CONSOLIDATE_THRESHOLD[scope.kind];
+}
+
+// ============================================================================
 // Harvest path: pending inbox + consolidation
 // ============================================================================
 

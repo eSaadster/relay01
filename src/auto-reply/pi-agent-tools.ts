@@ -12,6 +12,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai";
 
 import { dslToBlocks, type UiSpec } from "../slack/blocks.js";
+import { createMemoryTools } from "./memory-tools.js";
 
 // Base path for all Slack sessions
 export const SLACK_BASE_PATH = path.join(os.homedir(), "relay01", "slack");
@@ -2008,6 +2009,10 @@ export function createTools(
     notify?: (message: string) => Promise<void>;
     channelId?: string;
     canvas?: CanvasCallbacks;
+    /** Slack user ID — only set for DMs; gates user-scoped memory tools. */
+    userId?: string;
+    /** LLM caller used to consolidate memory once a scope's inbox fills. */
+    consolidateLlm?: (prompt: string) => Promise<string>;
   }
 ): AgentTool<any>[] {
   const ctx = createSessionContext(sessionName);
@@ -2035,6 +2040,12 @@ export function createTools(
     createAgentAnswerTool(),
     createAgentSteerTool(),
     createAgentStopTool(),
+    // Shared memory (host-side store; execution gated on USE_MEMORY_TOOLS)
+    ...createMemoryTools({
+      sessionName,
+      userId: options?.userId,
+      consolidateLlm: options?.consolidateLlm,
+    }),
   ];
   if (options?.notify) {
     tools.push(createSendMessageTool(ctx, options.notify));

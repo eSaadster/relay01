@@ -615,6 +615,10 @@ export class PiAgentManager {
         : undefined,
       channelId: resolvedChannelId,
       canvas: canvasCallbacks,
+      // Memory tools mirror the injection rule above: user scope is reachable
+      // only from that user's DM, so userId is passed through unchanged.
+      userId: isDm ? userId : undefined,
+      consolidateLlm: callSummarizerWithAgent,
     });
 
     // Combine session tools with programmatic skill tools
