@@ -11,3 +11,6 @@ package-lock.json
 .claude/
 .devin/
 .osgrep/
+state/
+memory/
+slack/
