@@ -33,10 +33,13 @@ import {
   type AgentEventStream,
   type Conversation,
   type ConversationId,
+  type Cursor,
   createRegistry,
   defineDoc,
   defineExtension,
   defineTool,
+  type EntryId,
+  type EntryRecord,
   GenerationTask,
   Harness,
   hook,
@@ -65,8 +68,12 @@ const ctx = BACKGROUND_CONTEXT;
 
 export const DB_FILE = "durable.sqlite";
 export const SESSIONS_FILE = "durable-sessions.json";
+export const STREAMED_FILE = "durable-streamed.json";
+export const DELIVERED_KIND = "relay.delivered";
+export const PLACEHOLDER_KIND = "relay.placeholder";
 export const MAX_RESUMES = 3;
 const EVENT_LAG_MS = 3000;
+const TICK_MS = 5000;
 const FALLBACK_FOLDERS = new Set(["@unknown", "@user"]);
 
 const REPLAY_SAFE = new Set([
@@ -160,6 +167,35 @@ export class SessionMap {
     this.entries = { ...this.entries, [key]: entry };
     if (this.file)
       writeAtomic(this.file, JSON.stringify(this.entries, null, 2));
+  }
+}
+
+export class StreamedReplies {
+  private ids: string[];
+
+  constructor(private file: string | null) {
+    this.ids =
+      file && existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
+  }
+
+  has(id: string) {
+    return this.ids.includes(id);
+  }
+
+  add(id: string) {
+    if (this.has(id)) return;
+    this.ids = [...this.ids, id].slice(-50);
+    this.save();
+  }
+
+  delete(id: string) {
+    if (!this.has(id)) return;
+    this.ids = this.ids.filter((known) => known !== id);
+    this.save();
+  }
+
+  private save() {
+    if (this.file) writeAtomic(this.file, JSON.stringify(this.ids));
   }
 }
 
@@ -380,17 +416,27 @@ export interface ToolActivity {
   isError?: boolean;
 }
 
-export interface AskInput {
+export interface SubmitInput {
   text: string;
   images?: ImageContent[];
   entry:
     | { kind: "slack.message"; data: SlackEntryData }
     | { kind: string; data?: Record<string, string | undefined> };
   requestId?: string;
+}
+
+export interface RunGuard {
   timeoutMs: number;
+  isPaused?(): boolean;
+}
+
+export interface WaitInput extends RunGuard {
+  onStart?(): void;
   onText?(text: string): void;
   onToolActivity?(activity: ToolActivity): void;
 }
+
+export type AskInput = SubmitInput & WaitInput;
 
 export interface AskResult {
   text: string;
@@ -405,7 +451,7 @@ export class AskTimeout extends Error {
   }
 }
 
-type Caller = Pick<AskInput, "onText" | "onToolActivity">;
+type Caller = Pick<WaitInput, "onStart" | "onText" | "onToolActivity">;
 
 interface RunRecord {
   inputs: readonly SubmissionId[];
@@ -414,6 +460,7 @@ interface RunRecord {
   ended: boolean;
   done: Promise<void>;
   end(): void;
+  disarm?(): void;
 }
 
 function answered(run: RunRecord) {
@@ -455,6 +502,7 @@ export class ChatRuntime {
     readonly conversation: Conversation,
     private orphans: Set<SubmissionId>,
     private onOrphanSettled: OrphanSettled,
+    private guard?: RunGuard,
   ) {}
 
   async start() {
@@ -488,15 +536,19 @@ export class ChatRuntime {
     };
   }
 
+  currentInputs(): readonly SubmissionId[] {
+    return this.current?.inputs ?? [];
+  }
+
   stopCurrentRun(): Promise<boolean> {
     return this.host.abortRun(this.conversation.id);
   }
 
-  async ask(input: AskInput): Promise<AskResult> {
+  submit(input: SubmitInput): Promise<Submission> {
     const content: UserInput = input.images?.length
       ? [{ type: "text", text: input.text }, ...input.images]
       : input.text;
-    const submission = await this.conversation.submit(
+    return this.conversation.submit(
       {
         type: "input",
         content,
@@ -505,6 +557,21 @@ export class ChatRuntime {
       },
       ctx,
     );
+  }
+
+  position(id: SubmissionId): Promise<number> {
+    return this.host.position(this.conversation.id, id);
+  }
+
+  async record(kind: string, data: Record<string, string>): Promise<void> {
+    await this.conversation.submit(
+      { type: "write", entry: { kind, data } },
+      ctx,
+    );
+  }
+
+  async ask(input: AskInput): Promise<AskResult> {
+    const submission = await this.submit(input);
     if (input.requestId) {
       const status = (await submission.status(ctx)).status;
       if (status === "done" || status === "unanswered") {
@@ -514,15 +581,24 @@ export class ChatRuntime {
         return { text: "", messages: [], duplicate: true };
       }
     }
+    return this.wait(submission, input);
+  }
+
+  async wait(submission: Submission, input: WaitInput): Promise<AskResult> {
     const caller: Caller = {
+      onStart: input.onStart,
       onText: input.onText,
       onToolActivity: input.onToolActivity,
     };
     this.callers.set(submission.id, caller);
     const started = this.runs.get(submission.id);
-    if (started && !started.caller) started.caller = caller;
+    if (started && !started.caller) {
+      started.caller = caller;
+      started.disarm?.();
+      if (!started.ended) caller.onStart?.();
+    }
     try {
-      const settled = await this.settle(submission, input.timeoutMs);
+      const settled = await this.settle(submission, input);
       const record = await this.runOf(submission.id);
       const messages = record?.messages ?? [];
       if (settled.status === "unanswered")
@@ -539,14 +615,14 @@ export class ChatRuntime {
 
   private async settle(
     submission: Submission,
-    timeoutMs: number,
+    guard: RunGuard,
   ): Promise<SettledSubmissionRecord> {
     const { context, cancel } = withCancel(ctx);
     let timedOut = false;
-    const timer = setTimeout(() => {
+    const disarm = this.countdown(submission.id, guard, () => {
       timedOut = true;
       cancel();
-    }, timeoutMs);
+    });
     try {
       return await submission.wait(context);
     } catch (err) {
@@ -554,8 +630,41 @@ export class ChatRuntime {
       await this.stopCurrentRun();
       throw new AskTimeout((await this.runOf(submission.id))?.messages ?? []);
     } finally {
-      clearTimeout(timer);
+      disarm();
     }
+  }
+
+  private countdown(
+    id: SubmissionId,
+    guard: RunGuard,
+    expire: () => void,
+  ): () => void {
+    const tickMs = Math.min(
+      TICK_MS,
+      Math.max(10, Math.floor(guard.timeoutMs / 10)),
+    );
+    let remaining = guard.timeoutMs;
+    const timer = setInterval(() => {
+      if (!this.current?.inputs.includes(id) || guard.isPaused?.()) return;
+      remaining -= tickMs;
+      if (remaining > 0) return;
+      clearInterval(timer);
+      expire();
+    }, tickMs);
+    return () => clearInterval(timer);
+  }
+
+  private guardOrphan(record: RunRecord) {
+    const id = record.inputs[0];
+    if (!this.guard || record.caller || !this.orphans.has(id)) return;
+    record.disarm = this.countdown(id, this.guard, () => {
+      console.error(
+        `[durable ${this.key}] Resumed run ${id} ran past ${this.guard?.timeoutMs}ms; stopping it`,
+      );
+      void this.stopCurrentRun().catch((err) =>
+        console.error(`[durable ${this.key}] Could not stop run ${id}: ${err}`),
+      );
+    });
   }
 
   private async runOf(id: SubmissionId): Promise<RunRecord | undefined> {
@@ -589,6 +698,8 @@ export class ChatRuntime {
     };
     this.runs.set(inputs[0], record);
     for (const id of [...this.runs.keys()].slice(0, -20)) this.runs.delete(id);
+    if (record.caller) record.caller.onStart?.();
+    else this.guardOrphan(record);
     return record;
   }
 
@@ -682,6 +793,7 @@ export class ChatRuntime {
         const record = this.current ?? this.runs.get(event.inputs[0]);
         this.current = undefined;
         if (!record) break;
+        record.disarm?.();
         record.ended = true;
         record.end();
         break;
@@ -757,6 +869,7 @@ export class DurableHost {
     private registry: ReturnType<typeof createRegistry>,
     private options: DurableHostOptions,
     private lockFile: string | undefined,
+    private storage: Storage,
   ) {
     harness.closed.then((end) => {
       if (this.closing) return;
@@ -793,7 +906,85 @@ export class DurableHost {
       registry,
       options,
       options.storage ? undefined : path.join(stateDir, `${DB_FILE}.pid`),
+      storage,
     );
+  }
+
+  keyOfFolder(folder: string): string | undefined {
+    return this.sessions
+      .keys()
+      .find((key) => this.sessions.get(key)?.folder === folder);
+  }
+
+  existing(
+    conversationId: ConversationId,
+    requestId: string,
+  ): Promise<SubmissionRecord | undefined> {
+    return this.storage.submissionByRequest(conversationId, requestId, ctx);
+  }
+
+  async position(
+    conversationId: ConversationId,
+    id: SubmissionId,
+  ): Promise<number> {
+    const inspection = await this.harness.inspect(ctx);
+    const index = inspection.submissions
+      .filter((s) => s.conversationId === conversationId && s.type === "input")
+      .findIndex((s) => s.id === id);
+    return Math.max(index, 0);
+  }
+
+  async settledInputs(
+    conversationId: ConversationId,
+    limit = 50,
+  ): Promise<SettledSubmissionRecord[]> {
+    const page = await this.storage.scanSubmissions(
+      { conversationId, order: "descending" },
+      limit,
+      undefined,
+      ctx,
+    );
+    return page.items.filter(
+      (s): s is SettledSubmissionRecord =>
+        s.type === "input" &&
+        (s.status === "done" || s.status === "unanswered"),
+    );
+  }
+
+  async entry(id: EntryId): Promise<EntryRecord | undefined> {
+    return (await this.storage.entry(id, ctx))?.entry;
+  }
+
+  async deliveries(
+    conversationId: ConversationId,
+    from: EntryId,
+  ): Promise<{ delivered: Set<string>; placeholders: Map<string, string> }> {
+    const delivered = new Set<string>();
+    const placeholders = new Map<string, string>();
+    const conversation = await this.harness.conversation(conversationId, ctx);
+    if (!conversation) return { delivered, placeholders };
+    let cursor: Cursor | undefined;
+    do {
+      const page = await conversation.entries(
+        { minEntryId: from },
+        200,
+        cursor,
+        ctx,
+      );
+      for (const entry of page.items) {
+        const data = entry.data as { requestId?: unknown; ts?: unknown };
+        if (typeof data?.requestId !== "string") continue;
+        if (entry.kind === DELIVERED_KIND) delivered.add(data.requestId);
+        else if (
+          entry.kind === PLACEHOLDER_KIND &&
+          typeof data.ts === "string" &&
+          !placeholders.has(data.requestId)
+        )
+          placeholders.set(data.requestId, data.ts);
+      }
+      cursor = page.next;
+    } while (cursor);
+    return { delivered, placeholders };
   }
 
   async ensureSession(
@@ -835,6 +1026,7 @@ export class DurableHost {
     setup: DurableSetup,
     orphans = new Set<SubmissionId>(),
     onOrphanSettled: OrphanSettled = () => {},
+    guard?: RunGuard,
   ): Promise<ChatRuntime> {
     const entry = this.sessions.get(key);
     if (!entry) throw new Error(`No durable session for ${key}`);
@@ -888,6 +1080,7 @@ export class DurableHost {
       conversation,
       orphans,
       onOrphanSettled,
+      guard,
     );
     await runtime.start();
     this.runtimes.set(key, runtime);
