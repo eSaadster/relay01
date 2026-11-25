@@ -4,8 +4,9 @@ import path from "node:path";
 import os from "node:os";
 
 import { Agent } from "@earendil-works/pi-agent-core";
-import { getModel, type Message, type TextContent } from "@earendil-works/pi-ai";
+import { type Message, type TextContent } from "@earendil-works/pi-ai";
 import { logVerbose } from "../globals.js";
+import { findModel } from "./pi-agent.js";
 import {
   type Scratchpad,
   parseScratchpad,
@@ -15,7 +16,7 @@ import {
 const OAUTH_PATH = path.join(os.homedir(), ".pi", "agent", "oauth.json");
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const MAX_MESSAGES_TO_SUMMARIZE = 150;
-const SUMMARIZER_MODEL = "claude-haiku-4-5";
+const SUMMARIZER_MODEL = "gpt-6-luna";
 
 interface ProviderAuth {
   type: string;
@@ -225,13 +226,10 @@ export function parseSummarizerResponse(response: string): {
 export async function callSummarizerWithAgent(prompt: string): Promise<string> {
   const agent = new Agent({ getApiKey: createGetApiKey() });
 
-  // Set model
-  try {
-    const model = getModel("anthropic", SUMMARIZER_MODEL as any);
-    agent.state.model = model;
-  } catch {
-    agent.state.model = getModel("anthropic", "claude-haiku-4-5");
-  }
+  // Set model using the configured custom provider.
+  const found = await findModel(SUMMARIZER_MODEL);
+  if (!found) throw new Error(`Summarizer model ${SUMMARIZER_MODEL} not found`);
+  agent.state.model = found.model;
 
   // Set system prompt for summarization
   agent.state.systemPrompt = "You are a helpful assistant that summarizes conversations. Output only the requested format, no preamble.";

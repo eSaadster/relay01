@@ -71,7 +71,7 @@ function isStopped(run: AgentRun): boolean {
 // (`pi install npm:@shift-labs/pi-rlm`) and Bun on PATH.
 const RLM_ENV = {
   PI_RLM_MAX_DEPTH: "2",
-  PI_RLM_SUBAGENT_MODEL: "opencode-go/deepseek-v4-flash",
+  PI_RLM_SUBAGENT_MODEL: "openai-codex/gpt-6-luna",
 };
 
 // Path to the ask_user pi extension (repo root /pi-extensions), valid from

@@ -3,7 +3,7 @@
 import {
   Agent,
 } from "@earendil-works/pi-agent-core";
-import { getModel, type TextContent } from "@earendil-works/pi-ai";
+import { type TextContent } from "@earendil-works/pi-ai";
 
 import { logVerbose } from "../../globals.js";
 import { loadSessionEnv } from "../../index.js";
@@ -14,7 +14,7 @@ import { loadClickState, saveClickResult, updateStateAfterRun } from "./state.js
 import type { ClickConfig, ClickContext, ClickResult } from "./types.js";
 
 const CLICK_TIMEOUT_MS = 300000; // 5 minutes
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_MODEL = "gpt-6-luna";
 
 function shouldAlwaysAlert(click: ClickConfig): boolean {
   return click.alertCriteria?.trim().toUpperCase() === "ALWAYS";
@@ -211,7 +211,9 @@ export async function executeClick(
       console.log(
         `[clicks] Model ${modelId} not found, using default for ${click.id}`
       );
-      agent.state.model = getModel("anthropic", DEFAULT_MODEL as any);
+      const fallback = await findModel(DEFAULT_MODEL);
+      if (!fallback) throw new Error(`Default model ${DEFAULT_MODEL} not found`);
+      agent.state.model = fallback.model;
     }
 
     // Build system prompt for click execution

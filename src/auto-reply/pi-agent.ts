@@ -173,7 +173,7 @@ function getCustomProviderApiKey(provider: string): string | undefined {
   return apiKeyConfig;
 }
 
-export const DEFAULT_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_MODEL = "gpt-6-luna";
 
 /**
  * Find model by ID - checks custom providers first, then built-in providers
@@ -491,11 +491,15 @@ export class PiAgentManager {
         console.log(`[${sessionName}] Using model ${configuredModel} from provider ${found.provider} (source: ${source})`);
       } else {
         console.log(`[${sessionName}] Model ${configuredModel} not found, using default`);
-        agent.state.model = getModel("anthropic", DEFAULT_MODEL as any);
+        const fallback = await findModel(DEFAULT_MODEL);
+        if (!fallback) throw new Error(`Default model ${DEFAULT_MODEL} not found`);
+        agent.state.model = fallback.model;
       }
     } else {
-      agent.state.model = getModel("anthropic", DEFAULT_MODEL as any);
-      console.log(`[${sessionName}] Using default model ${DEFAULT_MODEL} from Anthropic`);
+      const fallback = await findModel(DEFAULT_MODEL);
+      if (!fallback) throw new Error(`Default model ${DEFAULT_MODEL} not found`);
+      agent.state.model = fallback.model;
+      console.log(`[${sessionName}] Using default model ${DEFAULT_MODEL} from ${fallback.provider}`);
     }
 
     // Build enhanced system prompt - load from file hierarchy
