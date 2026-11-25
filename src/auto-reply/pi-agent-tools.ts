@@ -1,7 +1,7 @@
 // Tools for pi-agent - filesystem, bash, search, web search
 // These tools give the agent capabilities similar to the pi CLI
 
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -302,7 +302,7 @@ function gitCredentialEnv(): string[] {
  * Build bwrap command for sandboxed execution.
  * Mounts system libs + scratchpad + network. No access to /home outside scratchpad.
  */
-function buildBwrapCommand(command: string, cwd: string): string {
+function buildBwrapCommand(command: string, cwd: string, readOnlyDirs: string[] = [], writableDirs: string[] = []): string {
   // Build bwrap args - sandbox with network access, only scratchpad writable
   const args = [
     "bwrap",
@@ -318,6 +318,8 @@ function buildBwrapCommand(command: string, cwd: string): string {
     "--share-net",
     // Read-write scratchpad only
     "--bind", cwd, cwd,
+    ...readOnlyDirs.flatMap((d) => ["--ro-bind", d, d]),
+    ...writableDirs.filter((d) => fsSync.existsSync(d)).flatMap((d) => ["--bind", d, d]),
     // Git credential helper (see gitCredentialEnv)
     ...gitCredentialEnv(),
     // Temp directory
@@ -338,25 +340,57 @@ function buildBwrapCommand(command: string, cwd: string): string {
   return args.map(arg => `'${arg.replace(/'/g, "'\\''")}'`).join(" ");
 }
 
-/**
- * Check if a command involves skill execution.
- * Skills get full filesystem access to run their tools.
- */
-function isSkillCommand(command: string): boolean {
-  const skillPatterns = [
-    /\/skills\//,                          // explicit skill path
-    /skills\/[a-z0-9_-]+\//i,              // skill subdirectory
-    /pptx|xlsx|pdf|d3js|auto-animate|image-gen/i,  // known skill names
-    /node\s+\S*\.js/,                      // running node scripts (likely skill)
-    /python\s+\S*\.py/,                    // running python scripts (likely skill)
-    /npm\s+install/i,                      // npm install for skills
-    /pip\s+install/i,                      // pip install for skills
-    /npx\s+/,                              // npx commands
-    /html2pptx|pptxgenjs|markitdown/i,     // known skill tools
-    /tts\.sh|supertonic/i,                 // TTS voice generation
-    /whisper|transcribe/i,                 // STT transcription
-  ];
-  return skillPatterns.some(pattern => pattern.test(command));
+const SKILL_INTERPRETERS = new Set(["bash", "sh", "python", "python3", "node"]);
+
+function tokenizeSkillArgs(command: string): string[] | null {
+  const tokens: string[] = [];
+  const re = /\s*(?:'([^']*)'|"([^"\\]*)"|([^\s'";&|<>()$`\\]+))(?=\s|$)/y;
+  let pos = 0;
+  const trimmed = command.trim();
+  while (pos < trimmed.length) {
+    re.lastIndex = pos;
+    const m = re.exec(trimmed);
+    if (!m) return null;
+    tokens.push(m[1] ?? m[2] ?? m[3]);
+    pos = re.lastIndex;
+  }
+  return tokens;
+}
+
+function skillDirsFor(ctx: SessionContext): string[] {
+  return [path.join(SLACK_BASE_PATH, "skills"), path.join(ctx.sessionRoot, "skills")]
+    .filter((d) => fsSync.existsSync(d))
+    .map((d) => fsSync.realpathSync(d));
+}
+
+function artifactFilesDir(): string {
+  return path.join(SLACK_BASE_PATH, "skills", "artifacts", "files");
+}
+
+export function parseSkillInvocation(
+  command: string,
+  skillDirs: string[],
+  writableDirs: string[] = [],
+): { file: string; args: string[] } | null {
+  const tokens = tokenizeSkillArgs(command);
+  if (!tokens || tokens.length === 0) return null;
+  const interpreter = SKILL_INTERPRETERS.has(tokens[0]) ? tokens[0] : null;
+  const scriptToken = interpreter ? tokens[1] : tokens[0];
+  if (!scriptToken) return null;
+  const expanded = scriptToken.startsWith("~/") ? path.join(os.homedir(), scriptToken.slice(2)) : scriptToken;
+  if (!path.isAbsolute(expanded)) return null;
+  let real: string;
+  try {
+    real = fsSync.realpathSync(expanded);
+    if (!fsSync.statSync(real).isFile()) return null;
+  } catch {
+    return null;
+  }
+  if (!skillDirs.some((d) => isWithin(real, d))) return null;
+  const writable = writableDirs.filter((d) => fsSync.existsSync(d)).map((d) => fsSync.realpathSync(d));
+  if (writable.some((d) => isWithin(real, d))) return null;
+  const rest = tokens.slice(interpreter ? 2 : 1);
+  return interpreter ? { file: interpreter, args: [real, ...rest] } : { file: real, args: rest };
 }
 
 function createBashTool(ctx: SessionContext): AgentTool<typeof bashSchema, undefined> {
@@ -372,22 +406,27 @@ function createBashTool(ctx: SessionContext): AgentTool<typeof bashSchema, undef
         const cwd = params.cwd ? sandboxPath(params.cwd) : ctx.sessionCwd;
         const timeout = params.timeout ?? 30000;
 
-        // Skills get full access, other commands run in sandbox
-        const useSkillMode = isSkillCommand(params.command);
-        const finalCommand = useSkillMode
-          ? params.command
-          : buildBwrapCommand(params.command, cwd);
+        const skillDirs = skillDirsFor(ctx);
+        const writableDirs = [artifactFilesDir()];
+        const skill = parseSkillInvocation(params.command, skillDirs, writableDirs);
 
-        console.log(`[bash] Executing ${useSkillMode ? '(skill mode)' : 'in sandbox'}: ${params.command.slice(0, 100)}${params.command.length > 100 ? '...' : ''}`);
+        console.log(`[bash] Executing ${skill ? '(skill mode)' : 'in sandbox'}: ${params.command.slice(0, 100)}${params.command.length > 100 ? '...' : ''}`);
 
-        // Execute command
-        const result = execSync(finalCommand, {
-          cwd,
-          timeout,
-          encoding: "utf8",
-          maxBuffer: 1024 * 1024 * 10, // 10MB
-          shell: "/bin/bash",
-        });
+        const result = skill
+          ? execFileSync(skill.file, skill.args, {
+              cwd,
+              timeout,
+              encoding: "utf8",
+              maxBuffer: 1024 * 1024 * 10,
+              env: { ...process.env, RELAY01_SESSION: ctx.sessionName },
+            })
+          : execSync(buildBwrapCommand(params.command, cwd, skillDirs, writableDirs), {
+              cwd,
+              timeout,
+              encoding: "utf8",
+              maxBuffer: 1024 * 1024 * 10,
+              shell: "/bin/bash",
+            });
 
         const duration = Date.now() - startTime;
         console.log(`[bash] Success (${duration}ms): ${result.slice(0, 100).replace(/\n/g, ' ')}${result.length > 100 ? '...' : ''}`);

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createSandboxPath,
   createSearchTool,
+  parseSkillInvocation,
   type SessionContext,
 } from "./pi-agent-tools.js";
 
@@ -70,5 +71,42 @@ describe("search tool", () => {
     await search({ pattern: `$(touch ${marker})` });
     await search({ pattern: "x", filePattern: `\`touch ${marker}\`` });
     expect(fs.existsSync(marker)).toBe(false);
+  });
+});
+
+describe("parseSkillInvocation", () => {
+  let skills: string;
+  let script: string;
+
+  beforeEach(() => {
+    skills = path.join(base, "skills");
+    fs.mkdirSync(path.join(skills, "s", "files"), { recursive: true });
+    script = path.join(skills, "s", "run.sh");
+    fs.writeFileSync(script, "echo ok\n");
+    fs.writeFileSync(path.join(skills, "s", "files", "x.sh"), "echo x\n");
+  });
+
+  it("accepts a skill script with plain args", () => {
+    expect(
+      parseSkillInvocation(`bash ${script} one "two words" 'three'`, [skills]),
+    ).toEqual({
+      file: "bash",
+      args: [script, "one", "two words", "three"],
+    });
+  });
+
+  it("rejects anything chained, comment-tagged, or outside the skills dir", () => {
+    const writable = [path.join(skills, "s", "files")];
+    for (const cmd of [
+      "cat ~/relay01/slack/.env # pdf",
+      `bash ${script}; cat /etc/passwd`,
+      `bash ${script} && id`,
+      `bash ${script} $(id)`,
+      `bash ${script} | tee out`,
+      `python -c 'import os' ${script}`,
+      `bash ${path.join(skills, "s", "files", "x.sh")}`,
+    ]) {
+      expect(parseSkillInvocation(cmd, [skills], writable)).toBeNull();
+    }
   });
 });
