@@ -40,6 +40,27 @@ export interface SlackContext {
 	uploadFile(filePath: string, title?: string): Promise<void>;
 	/** Set working state (adds/removes working indicator emoji) */
 	setWorking(working: boolean): Promise<void>;
+	placeholderTs(): string | undefined;
+}
+
+export type SlackFile = { name: string; url_private_download?: string; url_private?: string };
+
+export interface SlackEventInput {
+	text: string;
+	channel: string;
+	user: string;
+	ts: string;
+	thread_ts?: string;
+	files?: SlackFile[];
+}
+
+export interface DurableTicket {
+	folder?: string;
+	run?(ctx: SlackContext): Promise<void>;
+}
+
+export interface DurableIntake {
+	intake(event: SlackEventInput, source: "channel" | "dm"): Promise<DurableTicket | undefined>;
 }
 
 export interface MomHandler {
@@ -78,6 +99,7 @@ export interface MomBotConfig {
 	onFeedback?: OnFeedback;
 	onBlockAction?: OnBlockAction;
 	onSlashCommand?: OnSlashCommand;
+	durable?: DurableIntake;
 }
 
 export interface ChannelInfo {
@@ -108,9 +130,11 @@ export class MomBot {
 	private onFeedback?: OnFeedback;
 	private onBlockAction?: OnBlockAction;
 	private onSlashCommand?: OnSlashCommand;
+	private durable?: DurableIntake;
 
 	constructor(handler: MomHandler, config: MomBotConfig) {
 		this.handler = handler;
+		this.durable = config.durable;
 		this.onFeedback = config.onFeedback;
 		this.onBlockAction = config.onBlockAction;
 		this.onSlashCommand = config.onSlashCommand;
@@ -351,6 +375,9 @@ export class MomBot {
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
 
+			const ticket = this.durable ? await this.durable.intake(slackEvent, "channel") : undefined;
+			if (ticket && !ticket.run) return;
+
 			// Log the mention message (message event may not fire for all channel types)
 			await this.logMessage({
 				text: slackEvent.text,
@@ -363,8 +390,9 @@ export class MomBot {
 			// Once mentioned in a thread, follow the rest of that thread
 			this.subscribeThread(slackEvent.channel, slackEvent.thread_ts ?? slackEvent.ts);
 
-			const ctx = await this.createContext(slackEvent, "channel");
-			await this.handler.onChannelMention(ctx);
+			const ctx = await this.createContext(slackEvent, "channel", ticket?.folder);
+			if (ticket?.run) await ticket.run(ctx);
+			else await this.handler.onChannelMention(ctx);
 		});
 
 		// Handle all messages (for logging) and DMs (for triggering handler)
@@ -394,6 +422,26 @@ export class MomBot {
 			// Ignore if no text AND no files
 			if (!slackEvent.text && (!slackEvent.files || slackEvent.files.length === 0)) return;
 
+			let ticket: DurableTicket | undefined;
+			if (this.durable) {
+				const isDm = slackEvent.channel_type === "im";
+				const mentioned = !!this.botUserId && (slackEvent.text ?? "").includes(`<@${this.botUserId}>`);
+				if (isDm || (!mentioned && this.isSubscribedThread(slackEvent.channel, slackEvent.thread_ts))) {
+					ticket = await this.durable.intake(
+						{
+							text: slackEvent.text || "",
+							channel: slackEvent.channel,
+							user: slackEvent.user,
+							ts: slackEvent.ts,
+							thread_ts: slackEvent.thread_ts,
+							files: slackEvent.files,
+						},
+						isDm ? "dm" : "channel",
+					);
+				}
+				if (ticket && !ticket.run) return;
+			}
+
 			// Log ALL messages (channel and DM)
 			await this.logMessage({
 				text: slackEvent.text || "",
@@ -411,8 +459,9 @@ export class MomBot {
 					user: slackEvent.user,
 					ts: slackEvent.ts,
 					files: slackEvent.files,
-				}, "dm");
-				await this.handler.onDirectMessage(ctx);
+				}, "dm", ticket?.folder);
+				if (ticket?.run) await ticket.run(ctx);
+				else await this.handler.onDirectMessage(ctx);
 				return;
 			}
 
@@ -420,7 +469,7 @@ export class MomBot {
 			// participates in trigger it like a mention. Mentions themselves are
 			// skipped here — the app_mention event already handles them.
 			const mentionsBot = !!this.botUserId && (slackEvent.text ?? "").includes(`<@${this.botUserId}>`);
-			if (!mentionsBot && this.isSubscribedThread(slackEvent.channel, slackEvent.thread_ts)) {
+			if (ticket?.run || (!mentionsBot && this.isSubscribedThread(slackEvent.channel, slackEvent.thread_ts))) {
 				const ctx = await this.createContext({
 					text: slackEvent.text || "",
 					channel: slackEvent.channel,
@@ -428,8 +477,9 @@ export class MomBot {
 					ts: slackEvent.ts,
 					thread_ts: slackEvent.thread_ts,
 					files: slackEvent.files,
-				}, "channel");
-				await this.handler.onChannelMention(ctx);
+				}, "channel", ticket?.folder);
+				if (ticket?.run) await ticket.run(ctx);
+				else await this.handler.onChannelMention(ctx);
 			}
 		});
 
@@ -587,7 +637,7 @@ export class MomBot {
 		ts: string;
 		thread_ts?: string;
 		files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
-	}, source: "channel" | "dm"): Promise<SlackContext> {
+	}, source: "channel" | "dm", folder?: string): Promise<SlackContext> {
 		// When the trigger came from inside a thread, respond in that thread.
 		const replyThreadTs = source === "channel" ? event.thread_ts : undefined;
 		const rawText = event.text;
@@ -616,9 +666,9 @@ export class MomBot {
 
 		// Compute session name for attachment downloads
 		// DMs use @username, channels use #channelname (channelName already includes #)
-		const sessionName = source === "dm"
+		const sessionName = folder ?? (source === "dm"
 			? `@${userName}`
-			: channelName ?? `#${event.channel}`;
+			: channelName ?? `#${event.channel}`);
 
 		// Process attachments - download to session scratchpad
 		const attachments = event.files ? this.store.processAttachments(sessionName, event.files, event.ts) : [];
@@ -791,6 +841,7 @@ export class MomBot {
 				await updatePromise;
 			},
 			hasRenderedBlocks: () => hasRenderedBlocks,
+			placeholderTs: () => messageTs ?? undefined,
 			setWorking: async (working: boolean) => {
 				updatePromise = updatePromise.then(async () => {
 					isWorking = working;
@@ -917,7 +968,32 @@ export class MomBot {
 		log.logBackfillComplete(totalMessages, durationMs);
 	}
 
+	async sessionFolder(event: SlackEventInput, source: "channel" | "dm"): Promise<string> {
+		if (source === "dm") return `@${(await this.getUserInfo(event.user)).userName}`;
+		if (!event.channel.startsWith("C")) return `#${event.channel}`;
+		return `#${await this.resolveChannelName(event.channel)}`;
+	}
+
+	async resolveFolder(
+		folder: string,
+	): Promise<{ channel: string; user?: string; isDm: boolean; folder: string } | undefined> {
+		const name = folder.slice(1);
+		if (folder.startsWith("#")) {
+			const channel = this.getChannelByName(name) ?? (/^[CG][A-Z0-9]+$/.test(name) ? name : undefined);
+			return channel ? { channel, isDm: false, folder } : undefined;
+		}
+		if (!folder.startsWith("@")) return undefined;
+		const user = [...this.userCache.entries()].find(([, info]) => info.userName === name)?.[0];
+		const channel = user ? await this.getOrCreateDmChannel(name) : undefined;
+		return user && channel ? { channel, user, isDm: true, folder } : undefined;
+	}
+
 	async start(): Promise<void> {
+		await this.prepare();
+		await this.connect();
+	}
+
+	async prepare(): Promise<void> {
 		const auth = await this.webClient.auth.test();
 		this.botUserId = auth.user_id as string;
 
@@ -927,7 +1003,9 @@ export class MomBot {
 
 		// Backfill any messages missed while offline
 		await this.backfillAllChannels();
+	}
 
+	async connect(): Promise<void> {
 		await this.socketClient.start();
 		log.logConnected();
 	}
