@@ -1,105 +1,18 @@
 // Session summarizer for pi-agent - uses pi-agent to create scratchpad content
-import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
 
 import { Agent } from "@earendil-works/pi-agent-core";
 import { type Message, type TextContent } from "@earendil-works/pi-ai";
 import { logVerbose } from "../globals.js";
-import { findModel } from "./pi-agent.js";
+import { createGetApiKey, findModel } from "./pi-agent.js";
 import {
   type Scratchpad,
   parseScratchpad,
   extractRecentTurns,
 } from "./pi-agent-scratchpad.js";
 
-const OAUTH_PATH = path.join(os.homedir(), ".pi", "agent", "oauth.json");
-const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const MAX_MESSAGES_TO_SUMMARIZE = 150;
 const SUMMARIZER_MODEL = "gpt-6-luna";
-
-interface ProviderAuth {
-  type: string;
-  refresh?: string;
-  access: string;
-  expires?: number;
-}
-
-interface OAuthConfig {
-  anthropic?: ProviderAuth;
-}
-
-/**
- * Refresh the Anthropic OAuth token if needed
- */
-async function refreshAnthropicToken(refreshToken: string): Promise<{ access: string; refresh: string; expires: number }> {
-  logVerbose("Refreshing Anthropic OAuth token for summarizer...");
-
-  const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      grant_type: "refresh_token",
-      client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-      refresh_token: refreshToken,
-    }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Token refresh failed: ${response.status} ${text}`);
-  }
-
-  const data = await response.json() as { access_token: string; refresh_token: string; expires_in: number };
-  const expires = Date.now() + (data.expires_in * 1000);
-
-  return {
-    access: data.access_token,
-    refresh: data.refresh_token,
-    expires,
-  };
-}
-
-/**
- * Load OAuth config and refresh token if needed
- */
-async function loadOAuth(): Promise<OAuthConfig> {
-  const content = await fs.readFile(OAUTH_PATH, "utf8");
-  const oauth: OAuthConfig = JSON.parse(content);
-
-  if (!oauth.anthropic) {
-    throw new Error("No Anthropic OAuth config found");
-  }
-
-  const now = Date.now();
-  const expires = oauth.anthropic.expires ?? 0;
-
-  if (expires - now < TOKEN_REFRESH_BUFFER_MS && oauth.anthropic.refresh) {
-    logVerbose("Token expired or expiring soon, refreshing...");
-    const newTokens = await refreshAnthropicToken(oauth.anthropic.refresh);
-    oauth.anthropic.access = newTokens.access;
-    oauth.anthropic.refresh = newTokens.refresh;
-    oauth.anthropic.expires = newTokens.expires;
-    await fs.writeFile(OAUTH_PATH, JSON.stringify(oauth, null, 2));
-  }
-
-  return oauth;
-}
-
-/**
- * Create a getApiKey function for the summarizer agent
- */
-function createGetApiKey(): (provider: string) => Promise<string | undefined> {
-  return async (provider: string) => {
-    if (provider === "anthropic") {
-      const oauth = await loadOAuth();
-      return oauth.anthropic?.access;
-    }
-    return undefined;
-  };
-}
 
 /**
  * Format messages for the summarizer prompt
