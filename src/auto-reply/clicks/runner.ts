@@ -3,7 +3,8 @@
 import {
   Agent,
 } from "@earendil-works/pi-agent-core";
-import { type TextContent } from "@earendil-works/pi-ai";
+import { createInitialSystemMessage, type TextContent, toToolDeclaration } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 
 import { logVerbose } from "../../globals.js";
 import { loadSessionEnv } from "../../index.js";
@@ -198,7 +199,7 @@ export async function executeClick(
 
   try {
     // Create agent
-    const agent = new Agent({ getApiKey: createGetApiKey() });
+    const agent = new Agent({ streamFn: streamSimple, getApiKey: createGetApiKey() });
 
     // Set model with auto provider detection
     const found = await findModel(modelId);
@@ -243,13 +244,15 @@ Be concise and focus on the task at hand.
       systemPrompt += "\n\n" + programmaticPromptAdditions;
     }
 
-    agent.state.systemPrompt = systemPrompt;
     agent.state.thinkingLevel = "off"; // Keep clicks fast
 
     // Set up tools
     const sessionTools = createTools(effectiveSession);
     const skillTools = registry.getAllTools();
-    agent.state.tools = [...sessionTools, ...skillTools];
+    const tools = [...sessionTools, ...skillTools];
+    agent.state.tools = tools;
+    const baseline = createInitialSystemMessage(systemPrompt, tools.map(toToolDeclaration));
+    agent.state.messages = baseline ? [baseline] : [];
 
     // Build prompt and execute
     const prompt = buildClickPrompt(click, lastRunTime);
