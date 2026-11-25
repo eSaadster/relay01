@@ -12,7 +12,7 @@ import { getModel, getProviders, getModels, streamSimple } from "@earendil-works
 
 import { logVerbose, isVerbose } from "../globals.js";
 import { loadSessionEnv } from "../index.js";
-import { createTools, createSessionContext, SLACK_BASE_PATH } from "./pi-agent-tools.js";
+import { type CanvasCallbacks, createTools, createSessionContext, SLACK_BASE_PATH } from "./pi-agent-tools.js";
 import {
   type Scratchpad,
   loadScratchpad,
@@ -444,7 +444,46 @@ export interface AgentInstance {
   userId?: string;        // Slack user ID (DM sessions only) for user-scoped memory
 }
 
-function formatToolName(toolName: string): string {
+export function createCanvasCallbacks(client: import("@slack/web-api").WebClient): CanvasCallbacks {
+  return {
+    create: async (args: { title?: string; markdown: string; channelId?: string }) => {
+      const res = await client.canvases.create({
+        title: args.title,
+        document_content: { type: "markdown", markdown: args.markdown },
+      } as any);
+      const canvasId = (res as any).canvas_id as string;
+      if (args.channelId && canvasId) {
+        await client.conversations.canvases.create({
+          channel_id: args.channelId,
+          document_content: { type: "markdown", markdown: args.markdown },
+        } as any).catch(() => {
+          // Fallback: share existing canvas to channel
+          return client.apiCall("canvases.access.set", {
+            canvas_id: canvasId,
+            access_level: "read",
+            channel_ids: [args.channelId],
+          } as any);
+        });
+      }
+      return { canvas_id: canvasId };
+    },
+    edit: async (args: { canvas_id: string; changes: import("./pi-agent-tools.js").CanvasChange[] }) => {
+      await client.canvases.edit({
+        canvas_id: args.canvas_id,
+        changes: args.changes,
+      } as any);
+    },
+    sectionsLookup: async (args: { canvas_id: string; criteria: { section_types?: string[]; contains_text?: string } }) => {
+      const res = await client.canvases.sections.lookup({
+        canvas_id: args.canvas_id,
+        criteria: args.criteria,
+      } as any);
+      return ((res as any).sections ?? []) as Array<{ id: string }>;
+    },
+  };
+}
+
+export function formatToolName(toolName: string): string {
   const toolLabels: Record<string, string> = {
     bash: "Running command",
     read_file: "Reading file",
@@ -586,45 +625,7 @@ export class PiAgentManager {
 
     // Build canvas callbacks if webClient is available
     const canvasCallbacks = this.config.webClient
-      ? (() => {
-          const client = this.config.webClient!;
-          return {
-            create: async (args: { title?: string; markdown: string; channelId?: string }) => {
-              const res = await client.canvases.create({
-                title: args.title,
-                document_content: { type: "markdown", markdown: args.markdown },
-              } as any);
-              const canvasId = (res as any).canvas_id as string;
-              if (args.channelId && canvasId) {
-                await client.conversations.canvases.create({
-                  channel_id: args.channelId,
-                  document_content: { type: "markdown", markdown: args.markdown },
-                } as any).catch(() => {
-                  // Fallback: share existing canvas to channel
-                  return client.apiCall("canvases.access.set", {
-                    canvas_id: canvasId,
-                    access_level: "read",
-                    channel_ids: [args.channelId],
-                  } as any);
-                });
-              }
-              return { canvas_id: canvasId };
-            },
-            edit: async (args: { canvas_id: string; changes: import("./pi-agent-tools.js").CanvasChange[] }) => {
-              await client.canvases.edit({
-                canvas_id: args.canvas_id,
-                changes: args.changes,
-              } as any);
-            },
-            sectionsLookup: async (args: { canvas_id: string; criteria: { section_types?: string[]; contains_text?: string } }) => {
-              const res = await client.canvases.sections.lookup({
-                canvas_id: args.canvas_id,
-                criteria: args.criteria,
-              } as any);
-              return ((res as any).sections ?? []) as Array<{ id: string }>;
-            },
-          };
-        })()
+      ? createCanvasCallbacks(this.config.webClient)
       : undefined;
 
     // Create session-specific tools (with proper sandbox isolation)

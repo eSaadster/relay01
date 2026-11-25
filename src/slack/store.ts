@@ -91,17 +91,7 @@ export class ChannelStore {
 			}
 
 			const filename = this.generateLocalFilename(file.name, timestamp);
-
-			// Download to session scratchpad if session name provided, otherwise legacy path
-			let absolutePath: string;
-			if (sessionName) {
-				// Session scratchpad: ~/relay01/slack/{sessionName}/scratchpad/attachments/
-				const scratchpadDir = join(process.env.HOME || "", "relay01", "slack", sessionName, "scratchpad", "attachments");
-				absolutePath = join(scratchpadDir, filename);
-			} else {
-				// Fallback to legacy path
-				absolutePath = join(this.workingDir, "attachments", filename);
-			}
+			const absolutePath = this.localPath(sessionName, filename);
 
 			attachments.push({
 				original: file.name,
@@ -116,6 +106,28 @@ export class ChannelStore {
 		this.processDownloadQueue();
 
 		return attachments;
+	}
+
+	planAttachments(
+		sessionName: string,
+		files: Array<{ name?: string; url_private_download?: string; url_private?: string }>,
+		timestamp: string,
+	): Attachment[] {
+		return files.flatMap((file) =>
+			file.name && (file.url_private_download || file.url_private)
+				? [{ original: file.name, local: this.localPath(sessionName, this.generateLocalFilename(file.name, timestamp)) }]
+				: [],
+		);
+	}
+
+	private localPath(sessionName: string | undefined, filename: string): string {
+		// Download to session scratchpad if session name provided, otherwise legacy path
+		if (sessionName) {
+			// Session scratchpad: ~/relay01/slack/{sessionName}/scratchpad/attachments/
+			return join(process.env.HOME || "", "relay01", "slack", sessionName, "scratchpad", "attachments", filename);
+		}
+		// Fallback to legacy path
+		return join(this.workingDir, "attachments", filename);
 	}
 
 	/**
