@@ -243,7 +243,7 @@ async function loadCodexCliTokens(): Promise<{ access: string; refresh: string }
  *
  * Base path: ~/relay01/slack/
  */
-async function loadSystemPrompt(sessionName?: string): Promise<string> {
+export async function loadSystemPrompt(sessionName?: string): Promise<string> {
   // Try session-specific prompt first
   if (sessionName) {
     const sessionPromptPath = path.join(SLACK_BASE_PATH, sessionName, "SYSTEM.md");
