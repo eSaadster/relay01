@@ -5,6 +5,7 @@ import os from "node:os";
 
 import { Agent } from "@earendil-works/pi-agent-core";
 import { type Message, type TextContent } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { logVerbose } from "../globals.js";
 import { findModel } from "./pi-agent.js";
 import {
@@ -224,15 +225,18 @@ export function parseSummarizerResponse(response: string): {
  * can reuse the same cheap-model path.
  */
 export async function callSummarizerWithAgent(prompt: string): Promise<string> {
-  const agent = new Agent({ getApiKey: createGetApiKey() });
+  const agent = new Agent({
+    streamFn: streamSimple,
+    getApiKey: createGetApiKey(),
+    initialState: {
+      systemPrompt: "You are a helpful assistant that summarizes conversations. Output only the requested format, no preamble.",
+    },
+  });
 
   // Set model using the configured custom provider.
   const found = await findModel(SUMMARIZER_MODEL);
   if (!found) throw new Error(`Summarizer model ${SUMMARIZER_MODEL} not found`);
   agent.state.model = found.model;
-
-  // Set system prompt for summarization
-  agent.state.systemPrompt = "You are a helpful assistant that summarizes conversations. Output only the requested format, no preamble.";
 
   // Disable thinking for faster response
   agent.state.thinkingLevel = "off";

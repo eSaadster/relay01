@@ -6,7 +6,8 @@ import {
   Agent,
   type AgentEvent,
 } from "@earendil-works/pi-agent-core";
-import { getModel, getProviders, getModels, type Message, type TextContent, type Model, type Api } from "@earendil-works/pi-ai";
+import { createInitialSystemMessage, toToolDeclaration, type Message, type TextContent, type Model, type Api } from "@earendil-works/pi-ai";
+import { getModel, getProviders, getModels, streamSimple } from "@earendil-works/pi-ai/compat";
 
 import { logVerbose, isVerbose } from "../globals.js";
 import { loadSessionEnv } from "../index.js";
@@ -474,7 +475,7 @@ export class PiAgentManager {
     sessionName: string,
     userId?: string
   ): Promise<Agent> {
-    const agent = new Agent({ getApiKey: createGetApiKey() });
+    const agent = new Agent({ streamFn: streamSimple, getApiKey: createGetApiKey() });
 
     // Set up session-specific context
     const sessionCtx = createSessionContext(sessionName);
@@ -553,8 +554,6 @@ export class PiAgentManager {
       systemPrompt += "\n\n" + programmaticPromptAdditions;
     }
 
-    agent.state.systemPrompt = systemPrompt;
-
     if (this.config.thinkingLevel) {
       agent.state.thinkingLevel = this.config.thinkingLevel;
     }
@@ -629,6 +628,8 @@ export class PiAgentManager {
     const skillTools = registry.getAllTools();
     const combinedTools = [...sessionTools, ...skillTools];
     agent.state.tools = combinedTools;
+    const baseline = createInitialSystemMessage(systemPrompt, combinedTools.map(toToolDeclaration));
+    agent.state.messages = baseline ? [baseline] : [];
     logVerbose(`Pi agent created with ${combinedTools.length} tools: ${combinedTools.map((t) => t.name).join(", ")}`);
 
     // Restore recent turns as a silent context warm-up
@@ -732,7 +733,7 @@ export class PiAgentManager {
     instance.summarizing = true;
 
     try {
-      const messages = instance.agent.state.messages as unknown as Message[];
+      const messages = (instance.agent.state.messages as unknown as Message[]).filter((m) => m.role !== "system");
       const existingScratchpad = await loadScratchpad(sessionName);
       const isDm = sessionName.startsWith("@");
       const result = await summarizeSession(messages, existingScratchpad, { isDm });
@@ -1051,7 +1052,7 @@ export class PiAgentManager {
       try {
         if (!instance.summarizing) {
           instance.summarizing = true;
-          const messages = instance.agent.state.messages as unknown as Message[];
+          const messages = (instance.agent.state.messages as unknown as Message[]).filter((m) => m.role !== "system");
           const existingScratchpad = await loadScratchpad(sessionName);
           const result = await summarizeSession(messages, existingScratchpad);
           await saveScratchpad(sessionName, result);
