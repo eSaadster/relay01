@@ -5,7 +5,7 @@ import * as log from "./log.js";
 import { MomBot, type SlackContext, type FeedbackEvent, type BlockActionEvent, type SlashCommandEvent, type SlashRespond } from "./slack.js";
 import { getApprovalManager } from "../auto-reply/approvals.js";
 import { formatAttachmentsPrompt } from "./attachments-prompt.js";
-import { getPiAgentManager, PiAgentManager, type PiAgentConfig, type ToolActivity } from "../auto-reply/pi-agent.js";
+import { createCanvasCallbacks, createGetApiKey, getPiAgentManager, PiAgentManager, type PiAgentConfig, type ToolActivity } from "../auto-reply/pi-agent.js";
 import { type Step, renderStepChecklist } from "./checklist.js";
 import { initializeSkills } from "../auto-reply/skills/index.js";
 import { getClickScheduler } from "../auto-reply/clicks/index.js";
@@ -18,6 +18,8 @@ import { getAgentManager } from "../auto-reply/agents/manager.js";
 import { loadConfig } from "../config/config.js";
 import { loadScratchpad, saveScratchpad } from "../auto-reply/pi-agent-scratchpad.js";
 import { applyFeedbackToScratchpad } from "../auto-reply/feedback.js";
+import { buildDurableSetup } from "../auto-reply/durable-setup.js";
+import { channelOf, DurableSlack, EVENT_KIND, NOTE_KIND } from "./durable-slack.js";
 
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN || process.env.MOM_SLACK_APP_TOKEN;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || process.env.MOM_SLACK_BOT_TOKEN;
@@ -67,6 +69,8 @@ const piTimeoutMs = Number(process.env.PI_TIMEOUT_MS) || 120000;
 // Track active runs per channel to prevent concurrent executions
 const activeRuns = new Set<string>();
 
+const durable = DurableSlack.fromEnv();
+
 async function handleMessage(ctx: SlackContext, source: "channel" | "dm"): Promise<void> {
 	const channelId = ctx.message.channel;
 	const messageText = ctx.message.text.toLowerCase().trim();
@@ -86,6 +90,19 @@ async function handleMessage(ctx: SlackContext, source: "channel" | "dm"): Promi
 
 	// Check for stop command
 	if (messageText === "stop") {
+		const durableStop = durable
+			? await durable.stop({ channel: ctx.message.channel, user: ctx.message.user, isDm: source === "dm" })
+			: undefined;
+		if (durableStop === "stopped") {
+			log.logStopRequest(logCtx);
+			await ctx.respond("_Stopping..._");
+			await ctx.replaceMessage("_Stopped_");
+			return;
+		}
+		if (durableStop === "idle") {
+			await ctx.respond("_Nothing running._");
+			return;
+		}
 		if (activeRuns.has(channelId)) {
 			log.logStopRequest(logCtx);
 			await ctx.respond("_Stopping..._");
@@ -363,6 +380,16 @@ async function handleSlashCommand(e: SlashCommandEvent, respond: SlashRespond): 
 			return;
 		}
 		case "stop": {
+			const durableStop = durable
+				? await durable.stop({ channel: e.channelId, user: e.userId, isDm })
+				: undefined;
+			if (durableStop) {
+				await respond(
+					durableStop === "stopped" ? "Stopped the active run." : "Nothing running in this channel.",
+					durableStop === "stopped",
+				);
+				return;
+			}
 			if (activeRuns.has(e.channelId)) {
 				manager.resetSession(sessionName);
 				activeRuns.delete(e.channelId);
@@ -404,13 +431,14 @@ const bot = new MomBot(
 			await getApprovalManager().handleAction(e.actionId, e.userName);
 		},
 		onSlashCommand: handleSlashCommand,
+		durable,
 	},
 );
 
 // Initialize skills system, start bot, and initialize click scheduler
 (async () => {
 	await initializeSkills();
-	await bot.start();
+	await (durable ? bot.prepare() : bot.start());
 
 	// Helper to resolve session name to channel ID
 	const getSessionChannelId = async (sessionName: string) => {
@@ -445,6 +473,31 @@ const bot = new MomBot(
 	console.log(`[config] Model: ${piAgentConfig.model}, Thinking: ${piAgentConfig.thinkingLevel}, Timeout: ${piAgentConfig.timeoutMs}ms`);
 	manager = getPiAgentManager(piAgentConfig, 720);
 
+	if (durable) {
+		getApprovalManager().configure({ webClient: bot.getWebClient(), getSessionChannelId });
+		await durable.start({
+			web: bot.getWebClient(),
+			getApiKey: createGetApiKey(),
+			setup: (key, entry) =>
+				buildDurableSetup(entry.folder, {
+					isDm: entry.isDm,
+					userId: entry.userId,
+					model: piAgentConfig.model,
+					thinkingLevel: piAgentConfig.thinkingLevel,
+					notify: (message) => piAgentConfig.notifyFn!(entry.folder, message),
+					channelId: channelOf(key),
+					canvas: createCanvasCallbacks(bot.getWebClient()),
+				}),
+			folderOf: (event, source) => bot.sessionFolder(event, source),
+			resolveFolder: (folder) => bot.resolveFolder(folder),
+			planAttachments: (folder, files, ts) => bot.store.planAttachments(folder, files, ts),
+			approvalPending: (folder) => getApprovalManager().hasPendingForSession(folder),
+			timeoutMs: piTimeoutMs,
+			selfCorrect: process.env.SELF_CORRECT !== "false",
+		});
+		await bot.connect();
+	}
+
 	// Initialize agent manager with Slack notification callback
 	const agentsCfg = loadConfig().agents;
 	const agentSendNotification = async (session: string, message: string) => {
@@ -468,6 +521,14 @@ const bot = new MomBot(
 			`Relay the outcome to the user in your usual voice. Report the run id ` +
 			`${run.id} and the real result. If the run failed, say so honestly.`;
 
+		const routed = durable
+			? await durable.note(session, { kind: NOTE_KIND, text: internalNote, requestId: `${run.id}:done` })
+			: undefined;
+		if (routed) {
+			if (routed.duplicate) return;
+			if (!routed.text.trim()) throw new Error("chat agent returned empty text for run completion");
+			return;
+		}
 		const result = await manager.prompt(session, internalNote, {});
 		if (result.text?.trim()) {
 			await agentSendNotification(session, result.text);
@@ -495,6 +556,14 @@ const bot = new MomBot(
 			`runId "${run.id}" and their answer so the run can continue. Do not invent ` +
 			`an answer yourself.`;
 
+		const routed = durable
+			? await durable.note(session, { kind: NOTE_KIND, text: internalNote, requestId: `${run.id}:${question.id}` })
+			: undefined;
+		if (routed) {
+			if (routed.duplicate) return;
+			if (!routed.text.trim()) throw new Error("chat agent returned empty text for run question");
+			return;
+		}
 		const result = await manager.prompt(session, internalNote, {});
 		if (result.text?.trim()) {
 			await agentSendNotification(session, result.text);
@@ -532,6 +601,12 @@ const bot = new MomBot(
 	await eventsWatcher.start({
 		webClient: bot.getWebClient(),
 		getSessionChannelId,
+		...(durable
+			? {
+					durable: (sessionName: string, message: string, requestId: string) =>
+						durable.note(sessionName, { kind: EVENT_KIND, text: message, requestId }),
+				}
+			: {}),
 	});
 
 	// Start dashboard bridge API

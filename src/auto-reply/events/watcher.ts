@@ -267,7 +267,7 @@ export class EventsWatcher {
     }
 
     console.log(`[events] Executing immediate event ${key}`);
-    await this.executeEvent(event);
+    await this.executeEvent(event, Math.round(event.mtime));
     await this.deleteEventFile(event);
   }
 
@@ -293,7 +293,7 @@ export class EventsWatcher {
 
     const handle = setTimeout(async () => {
       this.activeEvents.delete(key);
-      await this.executeEvent(event);
+      await this.executeEvent(event, targetTime);
       await this.deleteEventFile(event);
     }, delay);
     handle.unref();
@@ -316,7 +316,7 @@ export class EventsWatcher {
 
     try {
       const job = new Cron(config.cron, { timezone: config.timezone }, async () => {
-        await this.executeEvent(event);
+        await this.executeEvent(event, Math.floor(Date.now() / 1000) * 1000);
       });
 
       this.activeEvents.set(key, {
@@ -332,7 +332,7 @@ export class EventsWatcher {
   /**
    * Execute an event - wake up the session agent.
    */
-  private async executeEvent(event: ParsedEvent): Promise<EventResult> {
+  private async executeEvent(event: ParsedEvent, fireTime = Date.now()): Promise<EventResult> {
     const key = this.eventKey(event.sessionName, event.filename);
     const startTime = Date.now();
 
@@ -351,16 +351,26 @@ export class EventsWatcher {
       const eventMarker = `[EVENT:${event.filename}:${event.config.type}]`;
       const message = `${eventMarker} ${event.config.text}`;
 
-      // Wake up the session agent using the same manager as Slack messages
-      const manager = getPiAgentManager();
-      const result = await manager.prompt(event.sessionName, message);
+      const routed = this.config.durable
+        ? await this.config.durable(event.sessionName, message, `${key}:${fireTime}`)
+        : undefined;
+      let responseText: string;
+      let isSilent: boolean;
+      if (routed) {
+        responseText = routed.text;
+        isSilent = routed.silent;
+      } else {
+        // Wake up the session agent using the same manager as Slack messages
+        const manager = getPiAgentManager();
+        const result = await manager.prompt(event.sessionName, message);
 
-      const responseText = result.text || "";
-      const isSilent = responseText.includes("[SILENT]");
+        responseText = result.text || "";
+        isSilent = responseText.includes("[SILENT]");
 
-      // Send to Slack unless silent
-      if (!isSilent && responseText.trim()) {
-        await this.sendToSlack(event.sessionName, responseText.replace("[SILENT]", "").trim());
+        // Send to Slack unless silent
+        if (!isSilent && responseText.trim()) {
+          await this.sendToSlack(event.sessionName, responseText.replace("[SILENT]", "").trim());
+        }
       }
 
       const execResult: EventResult = {

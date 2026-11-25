@@ -98,4 +98,9 @@ export interface EventsWatcherConfig {
   webClient: WebClient;
   /** Function to resolve session name to channel ID */
   getSessionChannelId: (sessionName: string) => Promise<string | undefined>;
+  durable?: (
+    sessionName: string,
+    message: string,
+    requestId: string,
+  ) => Promise<{ text: string; silent: boolean } | undefined>;
 }
