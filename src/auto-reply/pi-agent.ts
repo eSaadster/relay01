@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -90,12 +91,15 @@ interface CustomModelDef {
   contextWindow?: number;
   maxTokens?: number;
   compat?: OpenAICompat;
+  baseUrl?: string;
+  headers?: Record<string, string>;
 }
 
 interface CustomProviderDef {
   baseUrl: string;
   apiKey: string; // env var name or literal
   api: Api;
+  headers?: Record<string, string>;
   models: CustomModelDef[];
 }
 
@@ -131,13 +135,16 @@ async function loadCustomModels(): Promise<Map<string, Model<Api>>> {
             name: modelDef.name,
             api: modelDef.api || providerDef.api,
             provider: providerName,
-            baseUrl: providerDef.baseUrl,
+            baseUrl: modelDef.baseUrl ?? providerDef.baseUrl,
             reasoning: modelDef.reasoning ?? false,
             input: modelDef.input ?? ["text"],
             cost: modelDef.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
             contextWindow: modelDef.contextWindow ?? 128000,
             maxTokens: modelDef.maxTokens ?? 8192,
             ...(modelDef.compat && { compat: modelDef.compat }),
+            ...((providerDef.headers || modelDef.headers) && {
+              headers: { ...providerDef.headers, ...modelDef.headers },
+            }),
           };
           cachedCustomModels.set(modelDef.id, model);
           logVerbose(`Loaded custom model: ${modelDef.id} from provider ${providerName}`);
@@ -183,7 +190,7 @@ export async function findModel(modelId: string): Promise<{ provider: string; mo
   const customModels = await loadCustomModels();
   const customModel = customModels.get(modelId);
   if (customModel) {
-    return { provider: customModel.provider, model: customModel };
+    return { provider: customModel.provider, model: withSessionHeaders(customModel) };
   }
 
   // Fall back to built-in providers
@@ -191,10 +198,19 @@ export async function findModel(modelId: string): Promise<{ provider: string; mo
     const models = getModels(provider);
     const model = models.find(m => m.id === modelId);
     if (model) {
-      return { provider, model: model as Model<Api> };
+      return { provider, model: withSessionHeaders(model as Model<Api>) };
     }
   }
   return null;
+}
+
+const OPENCODE_SESSION_HEADER = "x-opencode-session";
+
+export function withSessionHeaders(model: Model<Api>): Model<Api> {
+  if (!model.provider.startsWith("opencode")) return model;
+  const existing = Object.keys(model.headers ?? {}).some((k) => k.toLowerCase() === OPENCODE_SESSION_HEADER);
+  if (existing) return model;
+  return { ...model, headers: { ...model.headers, [OPENCODE_SESSION_HEADER]: randomUUID() } };
 }
 
 const OAUTH_PATH = path.join(os.homedir(), ".pi", "agent", "auth.json");
