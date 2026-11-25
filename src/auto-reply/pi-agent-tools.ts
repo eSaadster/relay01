@@ -63,40 +63,61 @@ export function createSessionContext(sessionName: string): SessionContext {
   return { sessionName, sessionCwd, sessionRoot };
 }
 
+function realResolve(p: string): string {
+  try {
+    return fsSync.realpathSync(p);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  let isLink = false;
+  try {
+    isLink = fsSync.lstatSync(p).isSymbolicLink();
+  } catch {}
+  if (isLink) {
+    throw new Error(`Access denied: dangling symlink (${p})`);
+  }
+  const parent = path.dirname(p);
+  if (parent === p) return p;
+  return path.join(realResolve(parent), path.basename(p));
+}
+
+function isWithin(target: string, dir: string): boolean {
+  return target === dir || target.startsWith(dir + path.sep);
+}
+
 /**
  * Create a sandboxPath function bound to a specific session context.
  * This avoids the global state race condition.
  */
-function createSandboxPath(ctx: SessionContext) {
+export function createSandboxPath(ctx: SessionContext) {
   return (inputPath: string, allowSkills = false, allowSessionRoot = false): string => {
     const resolved = path.isAbsolute(inputPath)
       ? path.resolve(inputPath)
       : path.resolve(path.join(ctx.sessionCwd, inputPath));
+    const real = realResolve(resolved);
+    const sessionCwd = realResolve(ctx.sessionCwd);
+    const sessionRoot = realResolve(ctx.sessionRoot);
 
     // Allow access to scratchpad
-    if (resolved.startsWith(ctx.sessionCwd + path.sep) || resolved === ctx.sessionCwd) {
-      return resolved;
+    if (isWithin(real, sessionCwd)) {
+      return real;
     }
 
     // Allow write access to session root (excluding protected paths)
-    if (allowSessionRoot) {
-      if (resolved.startsWith(ctx.sessionRoot + path.sep) || resolved === ctx.sessionRoot) {
-        const relative = path.relative(ctx.sessionRoot, resolved);
-        if (relative === "SYSTEM.md" || relative === "skills" || relative.startsWith("skills" + path.sep)) {
-          throw new Error(`Access denied: cannot write to protected path (${relative})`);
-        }
-        return resolved;
+    if (allowSessionRoot && isWithin(real, sessionRoot)) {
+      const relative = path.relative(sessionRoot, real);
+      if (relative === "SYSTEM.md" || relative === "skills" || relative.startsWith("skills" + path.sep)) {
+        throw new Error(`Access denied: cannot write to protected path (${relative})`);
       }
+      return real;
     }
 
     // Allow read-only access to skills directories
     if (allowSkills) {
-      const globalSkillsDir = path.join(SLACK_BASE_PATH, "skills");
-      const sessionSkillsDir = path.join(ctx.sessionRoot, "skills");
-
-      if (resolved.startsWith(globalSkillsDir + path.sep) || resolved === globalSkillsDir ||
-          resolved.startsWith(sessionSkillsDir + path.sep) || resolved === sessionSkillsDir) {
-        return resolved;
+      const globalSkillsDir = realResolve(path.join(SLACK_BASE_PATH, "skills"));
+      const sessionSkillsDir = realResolve(path.join(sessionRoot, "skills"));
+      if (isWithin(real, globalSkillsDir) || isWithin(real, sessionSkillsDir)) {
+        return real;
       }
     }
 
@@ -400,7 +421,7 @@ const searchSchema = Type.Object({
   maxResults: Type.Optional(Type.Number({ description: "Maximum number of results (default: 50)" })),
 });
 
-function createSearchTool(ctx: SessionContext): AgentTool<typeof searchSchema, undefined> {
+export function createSearchTool(ctx: SessionContext): AgentTool<typeof searchSchema, undefined> {
   const sandboxPath = createSandboxPath(ctx);
   return {
     name: "search",
@@ -410,34 +431,20 @@ function createSearchTool(ctx: SessionContext): AgentTool<typeof searchSchema, u
     execute: async (_toolCallId, params): Promise<AgentToolResult<undefined>> => {
       try {
         const searchPath = params.path ? sandboxPath(params.path) : ctx.sessionCwd;
-        const maxResults = params.maxResults ?? 50;
+        const maxResults = clampMaxResults(params.maxResults);
+        const { lines, error } = await runGrep(
+          buildGrepArgs(params.pattern, searchPath, params.filePattern),
+          maxResults,
+        );
 
-        // Build grep command
-        let cmd = `grep -rn --color=never`;
-        if (params.filePattern) {
-          cmd += ` --include="${params.filePattern}"`;
+        if (lines.length > 0) {
+          return { content: [{ type: "text", text: lines.join("\n") }], details: undefined };
         }
-        cmd += ` -E "${params.pattern.replace(/"/g, '\\"')}" "${searchPath}" | head -${maxResults}`;
-
-        const result = execSync(cmd, {
-          encoding: "utf8",
-          maxBuffer: 1024 * 1024,
-          shell: "/bin/bash",
-          timeout: 30000,
-        });
-
         return {
-          content: [{ type: "text", text: result || "No matches found" }],
+          content: [{ type: "text", text: error ? `Search error: ${error}` : "No matches found" }],
           details: undefined,
         };
       } catch (err: any) {
-        // grep returns exit code 1 when no matches found
-        if (err.status === 1 && !err.stderr) {
-          return {
-            content: [{ type: "text", text: "No matches found" }],
-            details: undefined,
-          };
-        }
         return {
           content: [{ type: "text", text: `Search error: ${err.message || err}` }],
           details: undefined,
@@ -445,6 +452,60 @@ function createSearchTool(ctx: SessionContext): AgentTool<typeof searchSchema, u
       }
     },
   };
+}
+
+function clampMaxResults(n: number | undefined): number {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 50;
+  return Math.min(Math.max(Math.floor(n), 1), 1000);
+}
+
+function buildGrepArgs(pattern: string, searchPath: string, filePattern?: string): string[] {
+  const args = ["-rn", "--color=never", "-E"];
+  if (filePattern) args.push(`--include=${filePattern}`);
+  args.push("-e", pattern, "--", searchPath);
+  return args;
+}
+
+function runGrep(args: string[], maxLines: number): Promise<{ lines: string[]; error?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("grep", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let buf = "";
+    let stderr = "";
+    const lines: string[] = [];
+    let done = false;
+    const finish = (error?: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ lines, error });
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish("search timed out after 30s");
+    }, 30000);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      buf += chunk;
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1 && lines.length < maxLines) {
+        lines.push(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+      }
+      if (lines.length >= maxLines) {
+        child.kill();
+        finish();
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < 2000) stderr += chunk;
+    });
+    child.on("error", (err) => finish(err.message));
+    child.on("close", (code) => {
+      if (buf && lines.length < maxLines) lines.push(buf);
+      finish(code === 2 ? stderr.trim() || "grep failed" : undefined);
+    });
+  });
 }
 
 // ============================================================================
